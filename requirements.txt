@@ -1,0 +1,6 @@
+pybit>=5.10.0
+pandas
+numpy
+python-dotenv
+requests
+schedule
