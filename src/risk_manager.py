@@ -58,18 +58,6 @@ class RiskManager:
         """
         self._check_daily_reset()
 
-        # 일일 최대 손실
-        if self.daily_pnl <= -Config.MAX_DAILY_LOSS_PCT:
-            msg = f"일일 최대 손실 도달: {self.daily_pnl:.2f}% (한도: -{Config.MAX_DAILY_LOSS_PCT}%)"
-            logger.warning(f"RISK: {msg}")
-            return False, msg
-
-        # 일일 최대 매매 횟수
-        if self.daily_trade_count >= Config.MAX_DAILY_TRADES:
-            msg = f"일일 최대 매매 횟수 도달: {self.daily_trade_count}/{Config.MAX_DAILY_TRADES}"
-            logger.warning(f"RISK: {msg}")
-            return False, msg
-
         # 쿨다운
         if self.cooldown_until and datetime.now(timezone.utc) < self.cooldown_until:
             remaining = (self.cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
@@ -132,7 +120,7 @@ class RiskManager:
         return True
 
     def calc_position_size(self, equity: float, confidence: int) -> float:
-        """포지션 사이즈 계산 (USDT).
+        """포지션 사이즈 계산 (USDT) — 레거시, 잔고 기반 사이징 권장.
 
         Args:
             equity: 총 자산 (USDT)
@@ -149,6 +137,86 @@ class RiskManager:
         size_pct = min(size_pct, Config.MAX_POSITION_SIZE_PCT)
         margin = equity * (size_pct / 100)
         return margin
+
+    def calc_qty_from_balance(
+        self,
+        available_balance: float,
+        mark_price: float,
+        qty_step: float,
+        min_qty: float,
+        leverage: int | None = None,
+    ) -> tuple[float, dict]:
+        """잔고 기반 포지션 수량 계산.
+
+        ErrCode 110007(잔고 부족) 방지를 위해 가용 잔고에서
+        reserve를 빼고 utilization/haircut을 적용하여 수량을 산출한다.
+
+        Args:
+            available_balance: 가용 USDT (availableToWithdraw)
+            mark_price: 현재가 / 마크 가격
+            qty_step: 종목의 수량 단위 (예: 0.1)
+            min_qty: 종목의 최소 수량
+            leverage: 레버리지 (기본 Config.LEVERAGE)
+
+        Returns:
+            (qty, detail_dict)
+            qty: 주문 수량 (0이면 진입 불가)
+            detail_dict: 로그용 계산 상세
+        """
+        from src.utils import round_qty as _round_qty
+
+        leverage = leverage or Config.LEVERAGE
+        reserve = Config.MIN_RESERVE_USDT
+        utilization = Config.BALANCE_UTILIZATION_PCT / 100
+        haircut = Config.SAFETY_HAIRCUT_PCT / 100
+
+        usable = available_balance - reserve
+        if usable <= 0 or mark_price <= 0:
+            detail = {
+                "available": round(available_balance, 4),
+                "reserve": reserve,
+                "usable": round(max(usable, 0), 4),
+                "reason": "insufficient_balance",
+            }
+            logger.warning(f"SIZING: 잔고 부족 — available={available_balance:.2f}, reserve={reserve}")
+            return 0.0, detail
+
+        notional = usable * utilization * (1 - haircut)
+        position_value = notional * leverage
+        raw_qty = position_value / mark_price
+        qty = _round_qty(raw_qty, qty_step)
+
+        detail = {
+            "available": round(available_balance, 4),
+            "reserve": reserve,
+            "utilization_pct": Config.BALANCE_UTILIZATION_PCT,
+            "haircut_pct": Config.SAFETY_HAIRCUT_PCT,
+            "usable": round(usable, 4),
+            "notional": round(notional, 4),
+            "leverage": leverage,
+            "position_value": round(position_value, 4),
+            "mark_price": round(mark_price, 6),
+            "raw_qty": round(raw_qty, 6),
+            "qty": qty,
+            "qty_step": qty_step,
+            "min_qty": min_qty,
+        }
+
+        if qty < min_qty:
+            detail["reason"] = "below_min_qty"
+            logger.warning(
+                f"SIZING: 최소 수량 미달 — qty={qty} < min_qty={min_qty} "
+                f"(available={available_balance:.2f})"
+            )
+            return 0.0, detail
+
+        detail["reason"] = "ok"
+        logger.info(
+            f"SIZING: qty={qty} | available={available_balance:.2f} "
+            f"→ usable={usable:.2f} → notional={notional:.2f} "
+            f"× {leverage}x → {position_value:.2f} / price={mark_price:.4f}"
+        )
+        return qty, detail
 
     def get_status(self) -> dict:
         """리스크 관리 현황."""

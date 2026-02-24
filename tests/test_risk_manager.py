@@ -92,6 +92,128 @@ class TestPositionSizing:
         assert margin <= max_margin
 
 
+class TestCalcQtyFromBalance:
+    """잔고 기반 포지션 수량 계산 테스트."""
+
+    def test_normal_sizing(self, risk_mgr):
+        """정상 잔고에서 수량 산출."""
+        # available=100, reserve=10, usable=90
+        # notional = 90 * 0.90 * 0.95 = 76.95
+        # position_value = 76.95 * 1 (leverage) = 76.95
+        # qty = 76.95 / 2.0 = 38.475 → round down to step 0.1 → 38.4
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=100.0,
+            mark_price=2.0,
+            qty_step=0.1,
+            min_qty=1.0,
+            leverage=1,
+        )
+        assert qty == pytest.approx(38.4)
+        assert detail["reason"] == "ok"
+
+    def test_with_leverage(self, risk_mgr):
+        """레버리지 적용 확인."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=100.0,
+            mark_price=2.0,
+            qty_step=0.1,
+            min_qty=1.0,
+            leverage=3,
+        )
+        # notional = 90 * 0.90 * 0.95 = 76.95
+        # position_value = 76.95 * 3 = 230.85
+        # qty = 230.85 / 2.0 = 115.425 → 115.4
+        assert qty == pytest.approx(115.4)
+        assert detail["leverage"] == 3
+
+    def test_qty_step_rounding(self, risk_mgr):
+        """수량이 qty_step 단위로 내림 처리."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=50.0,
+            mark_price=3.0,
+            qty_step=1.0,
+            min_qty=1.0,
+            leverage=1,
+        )
+        # usable=40, notional=40*0.9*0.95=34.2
+        # qty=34.2/3.0=11.4 → step=1 → 11.0
+        assert qty == pytest.approx(11.0)
+
+    def test_insufficient_balance(self, risk_mgr):
+        """잔고가 reserve 이하이면 qty=0."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=5.0,   # < reserve (10)
+            mark_price=2.0,
+            qty_step=0.1,
+            min_qty=1.0,
+        )
+        assert qty == 0.0
+        assert detail["reason"] == "insufficient_balance"
+
+    def test_zero_price(self, risk_mgr):
+        """가격이 0이면 qty=0."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=100.0,
+            mark_price=0.0,
+            qty_step=0.1,
+            min_qty=1.0,
+        )
+        assert qty == 0.0
+        assert detail["reason"] == "insufficient_balance"
+
+    def test_below_min_qty(self, risk_mgr):
+        """계산된 수량이 min_qty 미만이면 qty=0."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=11.0,   # usable=1
+            mark_price=2.0,
+            qty_step=1.0,
+            min_qty=5.0,             # min_qty=5 > calculated qty
+            leverage=1,
+        )
+        # usable=1, notional=1*0.9*0.95=0.855, qty=0.855/2=0.4275 → 0 (step=1)
+        assert qty == 0.0
+        assert detail["reason"] == "below_min_qty"
+
+    def test_exact_reserve_boundary(self, risk_mgr):
+        """잔고가 정확히 reserve와 같으면 qty=0."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=10.0,   # == reserve
+            mark_price=2.0,
+            qty_step=0.1,
+            min_qty=0.1,
+        )
+        assert qty == 0.0
+        assert detail["reason"] == "insufficient_balance"
+
+    def test_detail_dict_fields(self, risk_mgr):
+        """반환 dict에 로그용 필드들이 포함되는지 확인."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=200.0,
+            mark_price=2.5,
+            qty_step=0.1,
+            min_qty=1.0,
+            leverage=2,
+        )
+        assert qty > 0
+        for key in ("available", "reserve", "utilization_pct", "haircut_pct",
+                     "usable", "notional", "leverage", "position_value",
+                     "mark_price", "raw_qty", "qty", "qty_step", "min_qty", "reason"):
+            assert key in detail, f"Missing key: {key}"
+
+    def test_large_qty_step(self, risk_mgr):
+        """qty_step이 크면 많이 내림될 수 있음."""
+        qty, detail = risk_mgr.calc_qty_from_balance(
+            available_balance=100.0,
+            mark_price=2.0,
+            qty_step=10.0,
+            min_qty=10.0,
+            leverage=1,
+        )
+        # notional=76.95, qty=76.95/2=38.475 → step=10 → 30.0
+        assert qty == pytest.approx(30.0)
+        assert detail["reason"] == "ok"
+
+
 class TestEntryFilters:
     def test_no_position_passes(self, risk_mgr):
         import pandas as pd

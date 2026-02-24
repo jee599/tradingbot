@@ -41,7 +41,10 @@ class Config:
     TRAILING_STOP_ACTIVATE_PCT: float = float(os.getenv("TRAILING_STOP_ACTIVATE_PCT", "2.0"))
     TRAILING_STOP_CALLBACK_PCT: float = float(os.getenv("TRAILING_STOP_CALLBACK_PCT", "1.0"))
 
-    # 포지션 사이징
+    # 포지션 사이징 (잔고 기반)
+    BALANCE_UTILIZATION_PCT: float = float(os.getenv("BALANCE_UTILIZATION_PCT", "90"))
+    MIN_RESERVE_USDT: float = float(os.getenv("MIN_RESERVE_USDT", "10"))
+    SAFETY_HAIRCUT_PCT: float = float(os.getenv("SAFETY_HAIRCUT_PCT", "5"))
     HIGH_CONFIDENCE_SIZE_PCT: float = 8.0
     MAX_POSITION_SIZE_PCT: float = 10.0
     HIGH_CONFIDENCE_THRESHOLD: int = 3  # 3개 이상 지표 동의

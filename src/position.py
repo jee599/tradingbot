@@ -54,10 +54,19 @@ class PositionManager:
         return self.symbol.replace("USDT", "")
 
     def open_position(self, side: str, margin_usdt: float, current_price: float,
-                      signals: dict, indicators: dict) -> bool:
-        """포지션 진입."""
-        position_value = margin_usdt * Config.LEVERAGE
-        qty = round_qty(position_value / current_price, self.qty_step)
+                      signals: dict, indicators: dict,
+                      qty_override: float | None = None) -> bool:
+        """포지션 진입.
+
+        Args:
+            qty_override: 잔고 기반 사이징으로 미리 계산된 수량.
+                          지정하면 margin_usdt/price 기반 계산을 건너뛴다.
+        """
+        if qty_override is not None and qty_override > 0:
+            qty = qty_override
+        else:
+            position_value = margin_usdt * Config.LEVERAGE
+            qty = round_qty(position_value / current_price, self.qty_step)
 
         if qty < self.min_qty:
             logger.error(f"POSITION [{self.symbol}]: 수량 {qty} < 최소 {self.min_qty}, 진입 불가")
