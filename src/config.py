@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import os
+from enum import Enum
 from dotenv import load_dotenv
+
+
+class PositionMode(Enum):
+    """Bybit 포지션 모드."""
+    ONE_WAY = 0   # 단방향 (positionIdx=0)
+    HEDGE = 1     # 양방향 (positionIdx=1 Buy / 2 Sell)
 
 load_dotenv()
 
@@ -21,7 +28,8 @@ class Config:
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
     # 전략 파라미터
-    SYMBOL: str = os.getenv("SYMBOL", "XRPUSDT")
+    SYMBOL: str = os.getenv("SYMBOL", "XRPUSDT")  # 하위 호환
+    SYMBOLS: list = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "XRPUSDT")).split(",") if s.strip()]
     CATEGORY: str = "linear"
     INTERVAL: str = "60"  # 1시간봉
     KLINE_LIMIT: int = 300
