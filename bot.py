@@ -151,6 +151,7 @@ class TradingBot:
             "/pause": self._cmd_pause, "/중지": self._cmd_pause,
             "/resume": self._cmd_resume, "/재개": self._cmd_resume, "/시작": self._cmd_resume,
             "/trades": self._cmd_trades, "/매매내역": self._cmd_trades,
+            "/journal": self._cmd_journal, "/일지": self._cmd_journal, "/매매일지": self._cmd_journal,
             "/pnl": self._cmd_pnl, "/손익": self._cmd_pnl,
             "/config": self._cmd_config, "/설정": self._cmd_config,
             "/set": self._cmd_set, "/변경": self._cmd_set,
@@ -175,6 +176,7 @@ class TradingBot:
             "/분석 - 모든 코인 시그널\n"
             "/분석 BTC - 특정 코인 시그널\n"
             "/매매내역 - 최근 매매\n"
+            "/매매일지 - 사람이 읽기 쉬운 매매 일지 요약\n"
             "/손익 - 손익 요약\n"
             "/설정 - 현재 설정\n\n"
             "\U0001f3af <b>매매</b>\n"
@@ -205,9 +207,13 @@ class TradingBot:
             if mgr.has_position():
                 name = sym.replace("USDT", "")
                 ticker = self.exchange.get_ticker(symbol=sym)
-                pnl = pct_change(mgr.entry_price, ticker.get("last_price", 0), mgr.side)
+                last = ticker.get("last_price", 0)
+                pnl = pct_change(mgr.entry_price, last, mgr.side)
+                # Estimated USD PnL using internal qty (real exchange position may differ if out-of-sync)
+                pos_value = mgr.entry_price * mgr.qty
+                pnl_usdt = pos_value * (pnl / 100)
                 direction = "L" if mgr.side == "Buy" else "S"
-                pos_lines.append(f"  {name} {direction} {pnl:+.2f}%")
+                pos_lines.append(f"  {name} {direction} {pnl:+.2f}% (${pnl_usdt:+.2f})")
 
         pos_str = "\n".join(pos_lines) if pos_lines else "  없음"
 
@@ -251,6 +257,8 @@ class TradingBot:
             current = ticker.get("last_price", 0)
             pnl = pct_change(pos["entry_price"], current, pos["side"])
             direction = "Long" if pos["side"] == "Buy" else "Short"
+            # Exchange-reported PnL amount
+            upnl = float(pos.get("unrealized_pnl", 0) or 0)
 
             sl = mgr._calc_sl_price() if mgr.side else 0
             tp = mgr._calc_tp_price() if mgr.side else 0
@@ -259,7 +267,7 @@ class TradingBot:
                 f"\n<b>{name}</b> {direction}\n"
                 f"  수량: {pos['size']} | 레버: {pos['leverage']}x\n"
                 f"  진입: ${pos['entry_price']:.4f} | 현재: ${current:.4f}\n"
-                f"  PnL: {pnl:+.2f}% (${pos['unrealized_pnl']:.2f})\n"
+                f"  PnL: {pnl:+.2f}% (${upnl:+.2f})\n"
                 f"  SL: ${sl:.4f} | TP: ${tp:.4f}"
             )
 
@@ -365,8 +373,9 @@ class TradingBot:
             return f"\u274c {sym.replace('USDT', '')} 이미 포지션 보유 중"
 
         balance = self.exchange.get_balance()
-        available = balance.get("availableBalance", 0)
-        if available <= 0:
+        equity = balance.get("totalEquity", 0)
+        avail = balance.get("availableBalance", 0)
+        if equity <= 0:
             return "\u274c 잔고 부족"
 
         ticker = self.exchange.get_ticker(symbol=sym)
@@ -374,8 +383,13 @@ class TradingBot:
         if price <= 0:
             return "\u274c 가격 조회 실패"
 
-        qty, detail = self.risk_mgr.calc_qty_from_balance(
-            available, price, mgr.qty_step, mgr.min_qty,
+        qty, detail = self.risk_mgr.calc_qty_from_equity(
+            equity=equity,
+            confidence=2,
+            mark_price=price,
+            qty_step=mgr.qty_step,
+            min_qty=mgr.min_qty,
+            available_balance=avail,
         )
         if qty <= 0:
             return f"\u274c 수량 계산 불가: {detail.get('reason', 'unknown')}"
@@ -398,8 +412,9 @@ class TradingBot:
             return f"\u274c {sym.replace('USDT', '')} 이미 포지션 보유 중"
 
         balance = self.exchange.get_balance()
-        available = balance.get("availableBalance", 0)
-        if available <= 0:
+        equity = balance.get("totalEquity", 0)
+        avail = balance.get("availableBalance", 0)
+        if equity <= 0:
             return "\u274c 잔고 부족"
 
         ticker = self.exchange.get_ticker(symbol=sym)
@@ -407,8 +422,13 @@ class TradingBot:
         if price <= 0:
             return "\u274c 가격 조회 실패"
 
-        qty, detail = self.risk_mgr.calc_qty_from_balance(
-            available, price, mgr.qty_step, mgr.min_qty,
+        qty, detail = self.risk_mgr.calc_qty_from_equity(
+            equity=equity,
+            confidence=2,
+            mark_price=price,
+            qty_step=mgr.qty_step,
+            min_qty=mgr.min_qty,
+            available_balance=avail,
         )
         if qty <= 0:
             return f"\u274c 수량 계산 불가: {detail.get('reason', 'unknown')}"
@@ -447,6 +467,89 @@ class TradingBot:
                 f"{icon} {sym_name} {direction} {pnl:+.1f}% | ${t.get('net_pnl_usdt', 0):+.2f} | {reason}"
             )
         return "\n".join(lines)
+
+    def _cmd_journal(self, args: str) -> str:
+        """매매 일지를 사람이 읽기 쉬운 한글로 요약."""
+        trades = self.bot_logger.get_recent_trades(limit=200)
+        today_trades = self.bot_logger.get_today_trades()
+
+        balance = self.exchange.get_balance()
+        equity = balance.get("totalEquity", 0)
+        avail = balance.get("availableBalance", 0)
+
+        # 누적 손익
+        total_pnl = sum(t.get("net_pnl_usdt", 0) for t in trades)
+        today_pnl = sum(t.get("net_pnl_usdt", 0) for t in today_trades)
+
+        # 승/패
+        total_wins = sum(1 for t in trades if t.get("net_pnl_pct", 0) > 0)
+        total_losses = len(trades) - total_wins
+        today_wins = sum(1 for t in today_trades if t.get("net_pnl_pct", 0) > 0)
+        today_losses = len(today_trades) - today_wins
+
+        # 최근 5개를 '설명형'으로
+        reason_map = {
+            "TP_HIT": "익절 도달",
+            "SL_HIT": "손절 도달",
+            "TRAILING_STOP": "트레일링 스탑",
+            "TIME_EXIT": "시간 청산",
+            "MANUAL_CLOSE": "수동 청산",
+            "SERVER_TP": "서버 TP",
+            "SERVER_SL": "서버 SL",
+            "SERVER_CLOSE": "서버 청산",
+        }
+        def explain_trade(t: dict) -> str:
+            sym = (t.get("symbol", "").replace("USDT", "") or "-")
+            direction = t.get("direction", "")
+            pnl_pct = t.get("net_pnl_pct", 0)
+            pnl_usdt = t.get("net_pnl_usdt", 0)
+            reason = reason_map.get(t.get("exit_reason", ""), t.get("exit_reason", ""))
+            entry = t.get("entry_price", 0)
+            exitp = t.get("exit_price", 0)
+            holding = t.get("holding_hours", 0)
+            sign = "+" if pnl_usdt >= 0 else ""
+            return (
+                f"- {sym} {direction}: {sign}{pnl_pct:.2f}% ({sign}${pnl_usdt:.2f})\n"
+                f"  · 진입가→청산가: ${entry:.4f} → ${exitp:.4f}\n"
+                f"  · 종료 사유: {reason}\n"
+                f"  · 보유 시간: {holding:.1f}h"
+            )
+
+        recent5 = trades[-5:]
+        recent_lines = "\n".join(explain_trade(t) for t in reversed(recent5)) if recent5 else "- 없음"
+
+        # 현재 포지션 요약
+        pos_lines = []
+        for sym, mgr in self.pos_managers.items():
+            if mgr.has_position():
+                name = sym.replace("USDT", "")
+                ticker = self.exchange.get_ticker(symbol=sym)
+                current = ticker.get("last_price", 0)
+                pnl = pct_change(mgr.entry_price, current, mgr.side)
+                direction = "롱" if mgr.side == "Buy" else "숏"
+                pos_lines.append(f"- {name} {direction}: {pnl:+.2f}% (진입 ${mgr.entry_price:.4f} / 현재 ${current:.4f})")
+        pos_str = "\n".join(pos_lines) if pos_lines else "- 없음"
+
+        # 앞으로의 상황(규칙 기반, 예측 아님)
+        risk = self.risk_mgr.get_status()
+        can_trade = "가능" if risk.get("can_trade") else "차단"
+        next_note = (
+            f"- 자동매매 상태: {'중지' if self.paused else '운영중'}\n"
+            f"- 오늘 매매 횟수: {risk.get('daily_trade_count')}회 (제한 없음)\n"
+            f"- 쿨다운/차단 여부: {can_trade}\n"
+            f"- 손절 연속: {risk.get('consecutive_sl')}회 (기준 {Config.COOLDOWN_AFTER_SL_STREAK})"
+        )
+
+        return (
+            f"\U0001f4d3 <b>매매 일지(요약)</b>\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\U0001f4b0 현재 자산: ${equity:.2f} (가용 ${avail:.2f})\n"
+            f"\U0001f4c8 현재 포지션:\n{pos_str}\n\n"
+            f"\U0001f4c5 오늘 요약: {len(today_trades)}회 / {today_wins}승 {today_losses}패 | 손익 {today_pnl:+.2f}$\n"
+            f"\U0001f4ca 누적 요약: {len(trades)}회 / {total_wins}승 {total_losses}패 | 누적손익 {total_pnl:+.2f}$\n\n"
+            f"\U0001f9fe 최근 매매 5건(설명형):\n{recent_lines}\n\n"
+            f"\U0001f527 앞으로의 상태(규칙 기반):\n{next_note}"
+        )
 
     def _cmd_pnl(self, args: str) -> str:
         today_trades = self.bot_logger.get_today_trades()
@@ -608,7 +711,8 @@ class TradingBot:
                 "unrealized_pnl_pct": round(pnl, 2),
             }
 
-        filter_result = self.risk_mgr.check_entry_filters(df, mgr.has_position())
+        # 동시 포지션 보유 상태일 때는 진입 필터의 has_position을 False로 두고(추가진입은 별도 로직)
+        filter_result = self.risk_mgr.check_entry_filters(df, False)
 
         action = "HOLD"
         if self.paused:
@@ -643,36 +747,84 @@ class TradingBot:
         if self.paused:
             return
 
-        # 6. 포지션 보유 중 → 청산 체크
+        # 6. 포지션 보유 중 → 청산 체크 또는 피라미딩(추가진입)
         if mgr.has_position():
             exit_reason = mgr.check_exit(row["close"], combined, indicators)
             if exit_reason:
                 mgr.close_position(row["close"], exit_reason, indicators)
+                return
+
+            # 피라미딩: 같은 방향 시그널 유지 + 현재 수익중일 때만 추가진입
+            want_side = "Buy" if combined == 1 else "Sell" if combined == -1 else ""
+            if want_side and want_side == mgr.side and mgr.add_count < Config.PYRAMID_MAX_ADDS:
+                pnl_now = pct_change(mgr.entry_price, row["close"], mgr.side)
+                if pnl_now >= Config.PYRAMID_MIN_PROFIT_PCT:
+                    balance = self.exchange.get_balance()
+                    equity = balance.get("totalEquity", 0)
+                    avail = balance.get("availableBalance", 0)
+                    qty_add, detail = self.risk_mgr.calc_qty_from_equity(
+                        equity=equity,
+                        confidence=int(signals.get("confidence", 2)),
+                        mark_price=row["close"],
+                        qty_step=mgr.qty_step,
+                        min_qty=mgr.min_qty,
+                        size_multiplier=Config.PYRAMID_ADD_SIZE_MULT,
+                        available_balance=avail,
+                    )
+                    if qty_add > 0:
+                        mgr.add_position(
+                            current_price=row["close"],
+                            signals=signals,
+                            indicators=indicators,
+                            qty_add=qty_add,
+                        )
 
         # 7. 포지션 없음 → 시그널에 따라 진입
         elif combined != 0 and filter_result["passed"]:
+            # 동시 오픈 포지션 제한
+            active_positions = sum(1 for m in self.pos_managers.values() if m.has_position())
+            if active_positions >= Config.MAX_OPEN_POSITIONS:
+                logger.warning(f"RISK: 동시 포지션 제한({Config.MAX_OPEN_POSITIONS}) 도달 → {symbol} 진입 스킵")
+                return
+
             can_trade, reason = self.risk_mgr.can_trade()
             if can_trade:
                 balance = self.exchange.get_balance()
-                available = balance.get("availableBalance", 0)
-                if available > 0:
-                    side = "Buy" if combined == 1 else "Sell"
-                    qty, detail = self.risk_mgr.calc_qty_from_balance(
-                        available, row["close"], mgr.qty_step, mgr.min_qty,
+                equity = balance.get("totalEquity", 0)
+                avail = balance.get("availableBalance", 0)
+                if equity > 0:
+                    # P0: 전체 노출 한도 체크
+                    current_margin_total = sum(
+                        m.entry_price * m.qty / max(Config.LEVERAGE, 1)
+                        for m in self.pos_managers.values() if m.has_position()
                     )
-                    if qty > 0:
-                        mgr.open_position(
-                            side=side, margin_usdt=0,
-                            current_price=row["close"],
-                            signals=signals, indicators=indicators,
-                            qty_override=qty,
-                        )
+                    exposure_ok, exposure_reason = self.risk_mgr.check_total_exposure(
+                        current_margin_total, equity
+                    )
+                    if not exposure_ok:
+                        logger.warning(f"SIGNAL [{symbol}]: 전체 노출 한도 초과 → 진입 스킵 — {exposure_reason}")
                     else:
-                        logger.warning(
-                            f"SIGNAL [{symbol}]: 수량 계산 불가 — {detail.get('reason', 'unknown')}"
+                        side = "Buy" if combined == 1 else "Sell"
+                        qty, detail = self.risk_mgr.calc_qty_from_equity(
+                            equity=equity,
+                            confidence=int(signals.get("confidence", 2)),
+                            mark_price=row["close"],
+                            qty_step=mgr.qty_step,
+                            min_qty=mgr.min_qty,
+                            available_balance=avail,
                         )
+                        if qty > 0:
+                            mgr.open_position(
+                                side=side, margin_usdt=0,
+                                current_price=row["close"],
+                                signals=signals, indicators=indicators,
+                                qty_override=qty,
+                            )
+                        else:
+                            reason = detail.get('reason', 'unknown')
+                            logger.warning(f"SIGNAL [{symbol}]: 수량 계산 불가 — {reason}")
                 else:
-                    logger.error(f"SIGNAL [{symbol}]: 가용 잔고 0, 진입 불가")
+                    logger.error(f"SIGNAL [{symbol}]: equity 0, 진입 불가")
             else:
                 logger.info(f"SIGNAL [{symbol}]: 매매 차단 - {reason}")
 

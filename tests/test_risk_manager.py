@@ -26,6 +26,17 @@ class TestCanTrade:
         assert ok is False
         assert "일일 최대 손실" in reason
 
+    def test_daily_loss_disabled_by_flag(self, risk_mgr):
+        """ENFORCE_DAILY_LOSS_LIMIT=False이면 일일 손실 한도 무시."""
+        original = Config.ENFORCE_DAILY_LOSS_LIMIT
+        try:
+            Config.ENFORCE_DAILY_LOSS_LIMIT = False
+            risk_mgr.daily_pnl = -Config.MAX_DAILY_LOSS_PCT - 5
+            ok, _ = risk_mgr.can_trade()
+            assert ok is True
+        finally:
+            Config.ENFORCE_DAILY_LOSS_LIMIT = original
+
     def test_blocked_after_max_daily_trades(self, risk_mgr):
         risk_mgr.daily_trade_count = Config.MAX_DAILY_TRADES
         ok, reason = risk_mgr.can_trade()
@@ -212,6 +223,71 @@ class TestCalcQtyFromBalance:
         # notional=76.95, qty=76.95/2=38.475 → step=10 → 30.0
         assert qty == pytest.approx(30.0)
         assert detail["reason"] == "ok"
+
+
+class TestCalcQtyFromEquityHardCap:
+    """P0: calc_qty_from_equity의 하드캡 적용 테스트."""
+
+    def test_margin_capped_by_max_position_size_pct(self, risk_mgr):
+        """마진이 equity * MAX_POSITION_SIZE_PCT를 초과하지 않아야 함."""
+        original = Config.MAX_POSITION_SIZE_PCT
+        try:
+            Config.MAX_POSITION_SIZE_PCT = 5.0  # 5%
+            Config.POSITION_SIZE_PCT = 20.0  # 의도적으로 캡보다 큰 값
+            qty, detail = risk_mgr.calc_qty_from_equity(
+                equity=1000, confidence=2, mark_price=2.0,
+                qty_step=0.1, min_qty=0.1, leverage=1,
+            )
+            # margin should be capped at 1000 * 5% = 50
+            assert detail["margin_usdt"] <= 50.0 + 0.01
+        finally:
+            Config.MAX_POSITION_SIZE_PCT = original
+            Config.POSITION_SIZE_PCT = 5.0
+
+    def test_margin_capped_by_available_balance(self, risk_mgr):
+        """available_balance가 주어지면 마진이 가용잔고*0.95를 초과하지 않아야 함."""
+        qty, detail = risk_mgr.calc_qty_from_equity(
+            equity=10000, confidence=2, mark_price=2.0,
+            qty_step=0.1, min_qty=0.1, leverage=1,
+            available_balance=20.0,  # 매우 적은 가용잔고
+        )
+        # margin should be <= 20 * 0.95 = 19
+        assert detail["margin_usdt"] <= 19.0 + 0.01
+
+
+class TestTotalExposure:
+    """P0: 전체 노출 한도 테스트."""
+
+    def test_under_limit(self, risk_mgr):
+        ok, reason = risk_mgr.check_total_exposure(100.0, 1000.0)
+        assert ok is True
+
+    def test_over_limit(self, risk_mgr):
+        original = Config.MAX_TOTAL_EXPOSURE_PCT
+        try:
+            Config.MAX_TOTAL_EXPOSURE_PCT = 30.0
+            ok, reason = risk_mgr.check_total_exposure(300.0, 1000.0)
+            assert ok is False
+            assert "전체 노출 한도" in reason
+        finally:
+            Config.MAX_TOTAL_EXPOSURE_PCT = original
+
+    def test_zero_equity(self, risk_mgr):
+        ok, _ = risk_mgr.check_total_exposure(0.0, 0.0)
+        assert ok is False
+
+
+class TestDailyReset:
+    """P0: _check_daily_reset이 consecutive_sl과 last_sl_times도 리셋하는지."""
+
+    def test_resets_consecutive_sl_on_new_day(self, risk_mgr):
+        risk_mgr.consecutive_sl = 5
+        risk_mgr.last_sl_times = [datetime.now(timezone.utc)]
+        # 강제로 날짜를 어제로 변경
+        risk_mgr.daily_reset_date = "2020-01-01"
+        risk_mgr._check_daily_reset()
+        assert risk_mgr.consecutive_sl == 0
+        assert risk_mgr.last_sl_times == []
 
 
 class TestEntryFilters:

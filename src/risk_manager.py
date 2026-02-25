@@ -29,8 +29,11 @@ class RiskManager:
         if self.daily_reset_date != today:
             self.daily_pnl = 0.0
             self.daily_trade_count = 0
+            self.consecutive_sl = 0
+            self.last_sl_times = []
+            self.cooldown_until = None
             self.daily_reset_date = today
-            logger.info(f"RISK: 일일 카운터 리셋 ({today})")
+            logger.info(f"RISK: 일일 카운터 리셋 ({today}) — consecutive_sl/last_sl_times도 초기화")
 
     def record_trade(self, pnl_pct: float, exit_reason: str):
         """매매 결과 기록."""
@@ -57,6 +60,18 @@ class RiskManager:
             (가능 여부, 사유)
         """
         self._check_daily_reset()
+
+        # P0: 일일 최대 손실 한도
+        if Config.ENFORCE_DAILY_LOSS_LIMIT and self.daily_pnl <= -Config.MAX_DAILY_LOSS_PCT:
+            msg = f"일일 최대 손실 도달: {self.daily_pnl:.2f}% (한도: -{Config.MAX_DAILY_LOSS_PCT}%)"
+            logger.warning(f"RISK: {msg}")
+            return False, msg
+
+        # 일일 최대 매매 횟수
+        if self.daily_trade_count >= Config.MAX_DAILY_TRADES:
+            msg = f"최대 매매 횟수 도달: {self.daily_trade_count}/{Config.MAX_DAILY_TRADES}"
+            logger.warning(f"RISK: {msg}")
+            return False, msg
 
         # 쿨다운
         if self.cooldown_until and datetime.now(timezone.utc) < self.cooldown_until:
@@ -151,8 +166,10 @@ class RiskManager:
         ErrCode 110007(잔고 부족) 방지를 위해 가용 잔고에서
         reserve를 빼고 utilization/haircut을 적용하여 수량을 산출한다.
 
+        NOTE: 이 함수는 '가용 잔고 기준' 사이징이다.
+
         Args:
-            available_balance: 가용 USDT (availableToWithdraw)
+            available_balance: 가용 USDT
             mark_price: 현재가 / 마크 가격
             qty_step: 종목의 수량 단위 (예: 0.1)
             min_qty: 종목의 최소 수량
@@ -160,8 +177,6 @@ class RiskManager:
 
         Returns:
             (qty, detail_dict)
-            qty: 주문 수량 (0이면 진입 불가)
-            detail_dict: 로그용 계산 상세
         """
         from src.utils import round_qty as _round_qty
 
@@ -217,6 +232,112 @@ class RiskManager:
             f"× {leverage}x → {position_value:.2f} / price={mark_price:.4f}"
         )
         return qty, detail
+
+    def calc_qty_from_equity(
+        self,
+        equity: float,
+        confidence: int,
+        mark_price: float,
+        qty_step: float,
+        min_qty: float,
+        leverage: int | None = None,
+        size_multiplier: float = 1.0,
+        available_balance: float | None = None,
+    ) -> tuple[float, dict]:
+        """총자산(equity) 기준 포지션 수량 계산.
+
+        - margin(증거금)을 equity의 %로 결정 (POSITION_SIZE_PCT / HIGH_CONFIDENCE_SIZE_PCT)
+        - leverage를 곱해 position_value를 만든 뒤 qty로 환산
+        - P0 fix: MAX_POSITION_SIZE_PCT 하드캡 + available_balance 캡 적용
+        """
+        from src.utils import round_qty as _round_qty
+
+        leverage = leverage or Config.LEVERAGE
+
+        if equity <= 0 or mark_price <= 0:
+            detail = {
+                "equity": round(max(equity, 0), 4),
+                "confidence": confidence,
+                "reason": "invalid_equity_or_price",
+            }
+            return 0.0, detail
+
+        margin = self.calc_position_size(equity=equity, confidence=confidence) * max(size_multiplier, 0)
+
+        # P0 hard cap: margin <= equity * MAX_POSITION_SIZE_PCT / 100
+        max_margin = equity * Config.MAX_POSITION_SIZE_PCT / 100
+        if margin > max_margin:
+            logger.warning(
+                f"SIZING(EQUITY): 마진 하드캡 적용 — {margin:.2f} → {max_margin:.2f} "
+                f"(MAX_POSITION_SIZE_PCT={Config.MAX_POSITION_SIZE_PCT}%)"
+            )
+            margin = max_margin
+
+        # P0: available balance cap — never exceed what's actually available
+        if available_balance is not None and available_balance > 0:
+            usable = available_balance * 0.95  # 5% safety buffer
+            if margin > usable:
+                logger.warning(
+                    f"SIZING(EQUITY): 가용잔고 캡 적용 — margin {margin:.2f} → {usable:.2f} "
+                    f"(available={available_balance:.2f})"
+                )
+                margin = usable
+
+        position_value = margin * leverage
+        raw_qty = position_value / mark_price
+        qty = _round_qty(raw_qty, qty_step)
+
+        detail = {
+            "equity": round(equity, 4),
+            "confidence": confidence,
+            "size_multiplier": size_multiplier,
+            "margin_usdt": round(margin, 4),
+            "max_margin_cap": round(max_margin, 4),
+            "available_balance": round(available_balance, 4) if available_balance is not None else None,
+            "leverage": leverage,
+            "position_value": round(position_value, 4),
+            "mark_price": round(mark_price, 6),
+            "raw_qty": round(raw_qty, 6),
+            "qty": qty,
+            "qty_step": qty_step,
+            "min_qty": min_qty,
+        }
+
+        if qty < min_qty:
+            detail["reason"] = "below_min_qty"
+            logger.warning(
+                f"SIZING(EQUITY): 최소 수량 미달 — qty={qty} < min_qty={min_qty} (equity={equity:.2f})"
+            )
+            return 0.0, detail
+
+        detail["reason"] = "ok"
+        logger.info(
+            f"SIZING(EQUITY): qty={qty} | equity={equity:.2f} → margin={margin:.2f} × {leverage}x"
+            f" → {position_value:.2f} / price={mark_price:.4f}"
+        )
+        return qty, detail
+
+    def check_total_exposure(self, current_margin_total: float, equity: float) -> tuple[bool, str]:
+        """멀티심볼 합산 노출 한도 체크.
+
+        Args:
+            current_margin_total: 현재 오픈 포지션들의 합산 마진 (USDT)
+            equity: 총 자산
+
+        Returns:
+            (허용 여부, 사유)
+        """
+        if equity <= 0:
+            return False, "equity is zero"
+        exposure_pct = (current_margin_total / equity) * 100
+        if exposure_pct >= Config.MAX_TOTAL_EXPOSURE_PCT:
+            msg = (
+                f"전체 노출 한도 도달: {exposure_pct:.1f}% >= "
+                f"{Config.MAX_TOTAL_EXPOSURE_PCT}% (margin={current_margin_total:.2f}, equity={equity:.2f})"
+            )
+            logger.warning(f"RISK: {msg}")
+            return False, msg
+        return True, "OK"
 
     def get_status(self) -> dict:
         """리스크 관리 현황."""
