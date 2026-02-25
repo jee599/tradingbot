@@ -103,6 +103,25 @@ class TestBollinger:
         assert valid["bb_pct"].median() < 1
 
 
+class TestEmaCrossSymmetry:
+    """P0 fix: ema20_cross_up과 cross_down이 대칭적으로 동작하는지."""
+
+    def test_first_row_no_false_cross_down(self):
+        """첫 번째 유효 행에서 cross_down이 거짓으로 발생하지 않아야 함."""
+        df = _make_df(50)
+        result = calc_all_indicators(df)
+        # row 0: prev_above is NaN → fillna(False) → cross_down = ~above & False = False
+        assert result["ema20_cross_down"].iloc[0] == False
+
+    def test_symmetric_fillna(self):
+        """cross_up과 cross_down의 fillna가 모두 False여야 함."""
+        df = _make_df(50)
+        result = calc_all_indicators(df)
+        # Both should be False for the very first row (no previous data to compare)
+        assert result["ema20_cross_up"].iloc[0] == False
+        assert result["ema20_cross_down"].iloc[0] == False
+
+
 class TestCalcAllIndicators:
     def test_all_columns_present(self):
         df = _make_df(300)

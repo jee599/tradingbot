@@ -3,6 +3,8 @@
 import numpy as np
 import pandas as pd
 
+pd.set_option('future.no_silent_downcasting', True)
+
 
 def ema(series: pd.Series, period: int) -> pd.Series:
     """지수이동평균(EMA) 계산."""
@@ -137,7 +139,8 @@ def calc_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema20_above_50"] = df["ema20"] > df["ema50"]
     prev_above = df["ema20_above_50"].shift(1)
     df["ema20_cross_up"] = df["ema20_above_50"] & ~prev_above.fillna(False).astype(bool)
-    df["ema20_cross_down"] = ~df["ema20_above_50"] & prev_above.fillna(True).astype(bool)
+    # P0 fix: fillna(False) for both — symmetric behavior at start of data
+    df["ema20_cross_down"] = ~df["ema20_above_50"] & prev_above.fillna(False).astype(bool)
 
     # RSI 방향 전환 감지
     rsi = df["rsi"]

@@ -40,6 +40,24 @@ class TestSignalMA:
         val, _ = signal_ma(row)
         assert val == -1
 
+    def test_no_signal_on_trend_continuation(self):
+        """P0 fix: 크로스 없이 추세만 유지되면 시그널 0이어야 함."""
+        row = pd.Series({
+            "adx": 30, "ema20_cross_up": False, "ema20_cross_down": False,
+            "ema20_above_50": True,
+        })
+        val, _ = signal_ma(row)
+        assert val == 0
+
+    def test_no_signal_on_downtrend_continuation(self):
+        """P0 fix: 하향 추세 유지 시에도 시그널 0."""
+        row = pd.Series({
+            "adx": 30, "ema20_cross_up": False, "ema20_cross_down": False,
+            "ema20_above_50": False,
+        })
+        val, _ = signal_ma(row)
+        assert val == 0
+
 
 class TestSignalRSI:
     def test_long_rsi_reversal(self):

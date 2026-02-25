@@ -23,12 +23,7 @@ def signal_ma(row: pd.Series) -> tuple[int, str]:
     if row.get("ema20_cross_down", False):
         return -1, f"EMA20 crossed below EMA50, ADX={adx:.1f}>20"
 
-    # 크로스는 없지만 추세 유지 중이면 기존 방향 유지
-    if row.get("ema20_above_50", False) and adx > 25:
-        return 1, f"EMA20>EMA50 trend continues, ADX={adx:.1f}"
-    if not row.get("ema20_above_50", True) and adx > 25:
-        return -1, f"EMA20<EMA50 trend continues, ADX={adx:.1f}"
-
+    # P0 fix: 크로스 이벤트에서만 시그널 발생 (추세 유지 시그널 제거)
     return 0, f"No MA crossover, ADX={adx:.1f}"
 
 
