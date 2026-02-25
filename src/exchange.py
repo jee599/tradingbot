@@ -180,9 +180,12 @@ class BybitExchange:
             except (ValueError, TypeError):
                 return 0.0
 
+        # NOTE: In Bybit UNIFIED accounts, USDT['availableToWithdraw'] may be blank/0
+        # even when you have trading-available balance. For trading checks/sizing we prefer
+        # account-level 'totalAvailableBalance' when present.
         return {
             "totalEquity": _f(account.get("totalEquity", 0)),
-            "availableBalance": _f(usdt.get("availableToWithdraw", 0)),
+            "availableBalance": _f(account.get("totalAvailableBalance", usdt.get("availableToWithdraw", 0))),
             "totalMarginBalance": _f(account.get("totalMarginBalance", 0)),
             "totalWalletBalance": _f(account.get("totalWalletBalance", 0)),
         }
@@ -262,6 +265,11 @@ class BybitExchange:
             )
             order_id = result.get("orderId", "")
             logger.info(f"ORDER_SUCCESS [{symbol}]: {order_id}")
+
+            # P0: Post-order position verification
+            if order_type == "Market":
+                self._verify_position_after_order(symbol, side, qty, order_id)
+
             return result
         except Exception as e:
             if self._is_position_idx_error(e):
@@ -271,6 +279,38 @@ class BybitExchange:
                 )
             logger.critical(f"ORDER_FAILED [{symbol}]: {side} {qty} - {e}")
             return None
+
+    def _verify_position_after_order(self, symbol: str, expected_side: str,
+                                      expected_qty: float, order_id: str):
+        """P0: 주문 후 포지션 상태 확인. 불일치 시 경고 로그."""
+        try:
+            time.sleep(0.5)  # brief settle time
+            pos = self.get_position(symbol=symbol)
+            if pos is None:
+                logger.warning(
+                    f"ORDER_VERIFY [{symbol}]: 주문({order_id}) 후 포지션 없음! "
+                    f"expected {expected_side} {expected_qty}"
+                )
+                return
+            actual_side = pos.get("side", "")
+            actual_size = pos.get("size", 0)
+            if actual_side != expected_side:
+                logger.warning(
+                    f"ORDER_VERIFY [{symbol}]: 방향 불일치! "
+                    f"expected={expected_side}, actual={actual_side} (order={order_id})"
+                )
+            # Allow some tolerance for partial fills or existing position adds
+            if actual_size < expected_qty * 0.5:
+                logger.warning(
+                    f"ORDER_VERIFY [{symbol}]: 수량 불일치! "
+                    f"expected>={expected_qty}, actual={actual_size} (order={order_id})"
+                )
+            else:
+                logger.debug(
+                    f"ORDER_VERIFY [{symbol}]: OK — {actual_side} {actual_size} (order={order_id})"
+                )
+        except Exception as e:
+            logger.error(f"ORDER_VERIFY [{symbol}]: 검증 실패 — {e}")
 
     def close_position(self, side: str, qty: float, symbol: str = None) -> dict | None:
         """포지션 청산 (반대 방향 시장가).
@@ -428,19 +468,57 @@ class BybitExchange:
             logger.critical(f"ORDER_RETRY_FAILED [{symbol}]: {side} {qty} - {e2}")
             return None
 
+    # P0: Rate limit error codes from Bybit
+    _RATE_LIMIT_CODES = {"10006", "429", "118"}
+
+    @staticmethod
+    def _extract_error_code(err_str: str) -> str | None:
+        """에러 문자열에서 Bybit retCode 추출."""
+        # Pattern: "API Error 10006: ..." or just "10006" in message
+        for code in BybitExchange._RATE_LIMIT_CODES:
+            if code in err_str:
+                return code
+        return None
+
     def _api_call(self, func, retries: int = 3, **kwargs):
-        """API 호출 + 재시도 로직."""
+        """API 호출 + 재시도 로직 (P0: rate limit 감지 + 지수 백오프)."""
         for attempt in range(1, retries + 1):
             try:
                 resp = func(**kwargs)
-                if resp.get("retCode") != 0:
-                    raise Exception(f"API Error {resp.get('retCode')}: {resp.get('retMsg')}")
+                ret_code = resp.get("retCode")
+                if ret_code != 0:
+                    ret_code_str = str(ret_code)
+                    ret_msg = resp.get("retMsg", "")
+                    # Rate limit → 특별 처리
+                    if ret_code_str in self._RATE_LIMIT_CODES:
+                        wait = min(2 ** attempt, 30)  # 2, 4, 8... max 30s
+                        logger.warning(
+                            f"RATE_LIMIT: Bybit retCode={ret_code_str} ({ret_msg}) "
+                            f"— backing off {wait}s (attempt {attempt}/{retries})"
+                        )
+                        time.sleep(wait)
+                        if attempt == retries:
+                            raise Exception(f"Rate limit exceeded after {retries} retries: {ret_code_str}")
+                        continue
+                    raise Exception(f"API Error {ret_code}: {ret_msg}")
                 return resp.get("result", {})
             except Exception as e:
                 err_str = str(e)
                 # positionIdx 에러는 재시도해도 동일 → 즉시 상위로 전파
                 if self._is_position_idx_error(e):
                     raise
+                # Rate limit in exception message
+                rate_code = self._extract_error_code(err_str)
+                if rate_code:
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(
+                        f"RATE_LIMIT: code={rate_code} — backing off {wait}s "
+                        f"(attempt {attempt}/{retries})"
+                    )
+                    time.sleep(wait)
+                    if attempt == retries:
+                        raise
+                    continue
                 logger.error(f"API_ERROR: {err_str} - Retrying {attempt}/{retries}")
                 if attempt == retries:
                     raise
