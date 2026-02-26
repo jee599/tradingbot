@@ -86,6 +86,42 @@ class Config:
     # 청산 규칙
     TIME_EXIT_HOURS: int = 48
 
+    # ──────────────────────────────────────────
+    # 스캘핑 전략 (Plan B)
+    # ──────────────────────────────────────────
+    SCALP_MODE: bool = os.getenv("SCALP_MODE", "false").lower() == "true"
+
+    # 타임프레임
+    SCALP_ENTRY_INTERVAL: str = os.getenv("SCALP_ENTRY_INTERVAL", "5")    # 5분봉 진입
+    SCALP_FILTER_INTERVAL: str = os.getenv("SCALP_FILTER_INTERVAL", "15")  # 15분봉 필터
+
+    # 스캘핑 SL/TP (기본 전략보다 타이트)
+    SCALP_STOP_LOSS_PCT: float = float(os.getenv("SCALP_STOP_LOSS_PCT", "0.8"))
+    SCALP_TAKE_PROFIT_PCT: float = float(os.getenv("SCALP_TAKE_PROFIT_PCT", "1.4"))
+
+    # 스캘핑 트레일링
+    SCALP_TRAILING_ACTIVATE_PCT: float = float(os.getenv("SCALP_TRAILING_ACTIVATE_PCT", "0.8"))
+    SCALP_TRAILING_CALLBACK_PCT: float = float(os.getenv("SCALP_TRAILING_CALLBACK_PCT", "0.4"))
+
+    # 스캘핑 시간 청산 (분 단위)
+    SCALP_TIME_EXIT_MINUTES: int = int(os.getenv("SCALP_TIME_EXIT_MINUTES", "45"))
+
+    # 스캘핑 시그널 주기 (초)
+    SCALP_SIGNAL_INTERVAL_SEC: int = int(os.getenv("SCALP_SIGNAL_INTERVAL_SEC", "60"))
+
+    # 15m 필터 EMA
+    SCALP_FILTER_EMA_FAST: int = int(os.getenv("SCALP_FILTER_EMA_FAST", "50"))
+    SCALP_FILTER_EMA_SLOW: int = int(os.getenv("SCALP_FILTER_EMA_SLOW", "200"))
+
+    # 5m 풀백 트리거: price-to-EMA20 거리 %
+    SCALP_PULLBACK_DIST_PCT: float = float(os.getenv("SCALP_PULLBACK_DIST_PCT", "0.3"))
+    # 5m 풀백 RSI 범위
+    SCALP_PULLBACK_RSI_LOW: float = float(os.getenv("SCALP_PULLBACK_RSI_LOW", "35"))
+    SCALP_PULLBACK_RSI_HIGH: float = float(os.getenv("SCALP_PULLBACK_RSI_HIGH", "65"))
+
+    # 5m BB 브레이크아웃 볼륨 배수
+    SCALP_BB_VOL_RATIO: float = float(os.getenv("SCALP_BB_VOL_RATIO", "1.5"))
+
     # 진입 필터
     MIN_VOLUME_RATIO: float = float(os.getenv("MIN_VOLUME_RATIO", "0.3"))  # 20봉 평균 대비
     MAX_SPREAD_MULTIPLIER: float = 3.0  # 평소 대비 3배 이상 스프레드

@@ -18,6 +18,7 @@ from src.config import Config
 from src.exchange import BybitExchange
 from src.indicators import calc_all_indicators
 from src.strategy import generate_signals
+from src.strategy_scalp import generate_scalp_signals, calc_scalp_indicators
 from src.risk_manager import RiskManager
 from src.position import PositionManager
 from src.logger import BotLogger
@@ -75,17 +76,28 @@ class TradingBot:
         logger.info(f"심볼: {sym_names}")
         logger.info(f"레버리지: {Config.LEVERAGE}x")
         logger.info(f"테스트넷: {Config.BYBIT_TESTNET}")
-        logger.info(f"SL: -{Config.STOP_LOSS_PCT}% | TP: +{Config.TAKE_PROFIT_PCT}%")
+        if Config.SCALP_MODE:
+            logger.info(f"전략: SCALP (Plan B) | 5m entry + 15m filter")
+            logger.info(f"SL: -{Config.SCALP_STOP_LOSS_PCT}% | TP: +{Config.SCALP_TAKE_PROFIT_PCT}%")
+            logger.info(f"시간 청산: {Config.SCALP_TIME_EXIT_MINUTES}분")
+        else:
+            logger.info(f"전략: MA+RSI+BB+MTF (Legacy)")
+            logger.info(f"SL: -{Config.STOP_LOSS_PCT}% | TP: +{Config.TAKE_PROFIT_PCT}%")
         logger.info("=" * 60)
 
         mode = "Yes" if Config.BYBIT_TESTNET else "\u26a0\ufe0f LIVE"
+        strat_name = "SCALP (Plan B)" if Config.SCALP_MODE else "MA+RSI+BB+MTF"
+        sl_pct = Config.SCALP_STOP_LOSS_PCT if Config.SCALP_MODE else Config.STOP_LOSS_PCT
+        tp_pct = Config.SCALP_TAKE_PROFIT_PCT if Config.SCALP_MODE else Config.TAKE_PROFIT_PCT
+        sig_interval = f"{Config.SCALP_SIGNAL_INTERVAL_SEC}초" if Config.SCALP_MODE else "10분"
         self.notifier.send(
             f"\U0001f680 <b>봇 시작</b>\n"
+            f"전략: {strat_name}\n"
             f"코인: {sym_names}\n"
             f"레버리지: {Config.LEVERAGE}x\n"
             f"테스트넷: {mode}\n"
-            f"SL: -{Config.STOP_LOSS_PCT}% | TP: +{Config.TAKE_PROFIT_PCT}%\n"
-            f"시그널: 10분 간격 | 모니터링: 10초\n"
+            f"SL: -{sl_pct}% | TP: +{tp_pct}%\n"
+            f"시그널: {sig_interval} 간격 | 모니터링: 10초\n"
             f"/도움 으로 명령어 확인"
         )
 
@@ -102,8 +114,13 @@ class TradingBot:
                 # 텔레그램 명령어 폴링
                 self.notifier.poll_commands()
 
-                # 10분마다 시그널 분석 (모든 심볼)
-                if now.minute % 10 == 0 and now.second >= 10 and signal_key != self.last_signal_run:
+                # 시그널 분석: 스캘핑은 매분, 레거시는 10분
+                if Config.SCALP_MODE:
+                    scalp_key = now.strftime("%Y-%m-%d-%H-%M")
+                    if scalp_key != self.last_signal_run:
+                        self.last_signal_run = scalp_key
+                        self._signal_cycle()
+                elif now.minute % 10 == 0 and now.second >= 10 and signal_key != self.last_signal_run:
                     self.last_signal_run = signal_key
                     self._signal_cycle()
 
@@ -309,13 +326,32 @@ class TradingBot:
         name = symbol.replace("USDT", "")
         icons = {1: "\u2705", -1: "\u274c", 0: "\u2b1c"}
         default_icon = "\u2b1c"
-        lines = []
-        for k in ("MA", "RSI", "BB", "MTF"):
-            s = sig.get(k, {})
-            val = s.get("value", 0) if isinstance(s, dict) else 0
-            reason = s.get("reason", "N/A") if isinstance(s, dict) else "N/A"
-            icon = icons.get(val, default_icon)
-            lines.append(f"  {icon} {k}: {reason}")
+
+        if Config.SCALP_MODE:
+            # Scalp signal format
+            trend = sig.get("trend_filter", 0)
+            pb = sig.get("pullback", {})
+            bo = sig.get("breakout", {})
+
+            pb_val = pb.get("value", 0) if isinstance(pb, dict) else 0
+            bo_val = bo.get("value", 0) if isinstance(bo, dict) else 0
+            pb_reason = pb.get("reason", "N/A") if isinstance(pb, dict) else "N/A"
+            bo_reason = bo.get("reason", "N/A") if isinstance(bo, dict) else "N/A"
+
+            lines = [
+                f"  {icons.get(trend, default_icon)} Trend(15m): {sig.get('trend_reason', 'N/A')}",
+                f"  {icons.get(pb_val, default_icon)} Pullback: {pb_reason}",
+                f"  {icons.get(bo_val, default_icon)} Breakout: {bo_reason}",
+            ]
+        else:
+            # Legacy signal format
+            lines = []
+            for k in ("MA", "RSI", "BB", "MTF"):
+                s = sig.get(k, {})
+                val = s.get("value", 0) if isinstance(s, dict) else 0
+                reason = s.get("reason", "N/A") if isinstance(s, dict) else "N/A"
+                icon = icons.get(val, default_icon)
+                lines.append(f"  {icon} {k}: {reason}")
 
         return (
             f"\U0001f4e1 <b>{name} 시그널</b>\n"
@@ -573,9 +609,27 @@ class TradingBot:
 
     def _cmd_config(self, args: str) -> str:
         sym_names = ", ".join(s.replace("USDT", "") for s in self.symbols)
+        if Config.SCALP_MODE:
+            return (
+                f"\u2699\ufe0f <b>현재 설정 (SCALP)</b>\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"전략: SCALP (Plan B)\n"
+                f"코인: {sym_names}\n"
+                f"레버리지: {Config.LEVERAGE}x\n"
+                f"포지션 사이즈: {Config.POSITION_SIZE_PCT}%\n"
+                f"SL: -{Config.SCALP_STOP_LOSS_PCT}%\n"
+                f"TP: +{Config.SCALP_TAKE_PROFIT_PCT}%\n"
+                f"트레일링 활성: +{Config.SCALP_TRAILING_ACTIVATE_PCT}%\n"
+                f"트레일링 콜백: -{Config.SCALP_TRAILING_CALLBACK_PCT}%\n"
+                f"시간 청산: {Config.SCALP_TIME_EXIT_MINUTES}분\n"
+                f"진입 TF: {Config.SCALP_ENTRY_INTERVAL}m | 필터 TF: {Config.SCALP_FILTER_INTERVAL}m\n"
+                f"테스트넷: {Config.BYBIT_TESTNET}\n"
+                f"자동매매: {'중지' if self.paused else '운영중'}"
+            )
         return (
             f"\u2699\ufe0f <b>현재 설정</b>\n"
             f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"전략: MA+RSI+BB+MTF (Legacy)\n"
             f"코인: {sym_names}\n"
             f"레버리지: {Config.LEVERAGE}x\n"
             f"포지션 사이즈: {Config.POSITION_SIZE_PCT}%\n"
@@ -699,13 +753,17 @@ class TradingBot:
     # ──────────────────────────────────────────────
 
     def _signal_cycle(self):
-        """10분마다 실행 - 모든 심볼 순회."""
+        """시그널 분석 루프 - 모든 심볼 순회."""
+        mode_label = "SCALP" if Config.SCALP_MODE else "LEGACY"
         logger.info("=" * 40)
-        logger.info(f"SIGNAL_CYCLE 시작 ({len(self.symbols)}개 코인)")
+        logger.info(f"SIGNAL_CYCLE [{mode_label}] 시작 ({len(self.symbols)}개 코인)")
 
         for sym in self.symbols:
             try:
-                self._analyze_symbol(sym)
+                if Config.SCALP_MODE:
+                    self._analyze_symbol_scalp(sym)
+                else:
+                    self._analyze_symbol(sym)
             except Exception as e:
                 logger.error(f"SIGNAL_ERROR [{sym}]: {e}", exc_info=True)
 
@@ -913,6 +971,227 @@ class TradingBot:
             # 처리한 캔들 ts 기록
             self.last_processed_candle_ts[symbol] = candle_ts
 
+    # ──────────────────────────────────────────────
+    # 스캘핑 전략 (Plan B)
+    # ──────────────────────────────────────────────
+
+    def _analyze_symbol_scalp(self, symbol: str):
+        """스캘핑 전략: 15m 필터 + 5m 트리거."""
+        mgr = self.pos_managers[symbol]
+        name = symbol.replace("USDT", "")
+
+        # 1. 15m 데이터 (추세 필터)
+        df_15m = self.exchange.get_klines(
+            interval=Config.SCALP_FILTER_INTERVAL,
+            limit=Config.KLINE_LIMIT,
+            symbol=symbol,
+        )
+        # 2. 5m 데이터 (진입 트리거)
+        df_5m = self.exchange.get_klines(
+            interval=Config.SCALP_ENTRY_INTERVAL,
+            limit=Config.KLINE_LIMIT,
+            symbol=symbol,
+        )
+
+        if df_5m.empty or df_15m.empty:
+            logger.error(f"SCALP [{symbol}]: 캔들 데이터 조회 실패")
+            return
+
+        # 3. 시그널 생성
+        signals = generate_scalp_signals(df_5m, df_15m)
+        combined = signals["combined_signal"]
+        confidence = signals["confidence"]
+
+        self.last_signals[symbol] = signals
+
+        # 캔들 중복 방지
+        candle_ts = str(df_5m.iloc[-1]["timestamp"]) if "timestamp" in df_5m.columns else ""
+        prev_ts = self.last_processed_candle_ts.get(symbol, "")
+        is_new_candle = candle_ts != "" and candle_ts != prev_ts
+        allow_entry = (not Config.TRADE_ON_CANDLE_CLOSE_ONLY) or is_new_candle
+
+        # 4. 지표값 추출
+        df_5m_ind = calc_scalp_indicators(df_5m)
+        row = df_5m_ind.iloc[-1]
+        indicators = {
+            "ema20": round(row.get("ema20", 0), 6),
+            "rsi": round(row.get("rsi", 0), 2),
+            "bb_pct": round(row.get("bb_pct", 0), 4),
+            "volume_ratio": round(row.get("volume_ratio", 0), 2),
+        }
+        self.last_indicators[symbol] = indicators
+
+        # 5. 시그널 로그
+        candle = {
+            "open": round(row["open"], 6), "high": round(row["high"], 6),
+            "low": round(row["low"], 6), "close": round(row["close"], 6),
+            "volume": round(row["volume"], 2),
+        }
+
+        pos_info = mgr.get_position_info()
+        current_position = None
+        if pos_info:
+            pnl = pct_change(pos_info["entry_price"], row["close"], pos_info["side"])
+            current_position = {
+                "side": pos_info["side"], "size": pos_info["size"],
+                "entry_price": pos_info["entry_price"],
+                "unrealized_pnl_pct": round(pnl, 2),
+            }
+
+        filter_result = self.risk_mgr.check_entry_filters(df_5m_ind, False)
+
+        action = "HOLD"
+        if self.paused:
+            action = "PAUSED"
+        elif mgr.has_position():
+            exit_reason = self._check_scalp_exit(mgr, row["close"], combined, indicators)
+            if exit_reason:
+                action = f"CLOSE_{exit_reason}"
+        elif combined != 0 and filter_result["passed"]:
+            can_trade, reason = self.risk_mgr.can_trade()
+            if not allow_entry:
+                action = "WAIT_CANDLE_CLOSE"
+            elif can_trade:
+                action = "OPEN_LONG" if combined == 1 else "OPEN_SHORT"
+            else:
+                action = f"BLOCKED_{reason}"
+
+        signal_log = {
+            "timestamp": timestamp_now(),
+            "symbol": symbol,
+            "strategy": "scalp",
+            "candle": candle,
+            "indicators": indicators,
+            "signals": {
+                "trend_filter": signals["trend_filter"],
+                "pullback": signals["pullback"],
+                "breakout": signals["breakout"],
+            },
+            "combined_signal": combined,
+            "signal_detail": signals["signal_detail"],
+            "filter_check": filter_result,
+            "action": action,
+            "current_position": current_position,
+        }
+        self.bot_logger.log_signal(signal_log)
+        logger.info(f"SCALP [{symbol}]: {signals['signal_detail']} -> {action}")
+
+        if self.paused:
+            self.last_processed_candle_ts[symbol] = candle_ts
+            return
+
+        # 6. 포지션 보유 중 → 청산 체크
+        if mgr.has_position():
+            exit_reason = self._check_scalp_exit(mgr, row["close"], combined, indicators)
+            if exit_reason:
+                mgr.close_position(row["close"], exit_reason, indicators)
+                self.last_processed_candle_ts[symbol] = candle_ts
+                return
+
+        # 7. 진입
+        elif combined != 0 and filter_result["passed"]:
+            if not allow_entry:
+                logger.info(f"SCALP [{symbol}]: 캔들 마감 대기 → 진입 스킵")
+                self.last_processed_candle_ts[symbol] = candle_ts
+                return
+
+            active_positions = sum(1 for m in self.pos_managers.values() if m.has_position())
+            if active_positions >= Config.MAX_OPEN_POSITIONS:
+                logger.warning(f"RISK: 동시 포지션 제한({Config.MAX_OPEN_POSITIONS}) 도달 → {symbol} 진입 스킵")
+                self.last_processed_candle_ts[symbol] = candle_ts
+                return
+
+            can_trade, reason = self.risk_mgr.can_trade()
+            if can_trade:
+                balance = self.exchange.get_balance()
+                equity = balance.get("totalEquity", 0)
+                avail = balance.get("availableBalance", 0)
+                if equity > 0:
+                    current_margin_total = sum(
+                        m.entry_price * m.qty / max(Config.LEVERAGE, 1)
+                        for m in self.pos_managers.values() if m.has_position()
+                    )
+                    exposure_ok, exposure_reason = self.risk_mgr.check_total_exposure(
+                        current_margin_total, equity
+                    )
+                    if not exposure_ok:
+                        logger.warning(f"SCALP [{symbol}]: 전체 노출 한도 초과 → {exposure_reason}")
+                    else:
+                        side = "Buy" if combined == 1 else "Sell"
+                        qty, detail = self.risk_mgr.calc_qty_from_equity(
+                            equity=equity,
+                            confidence=max(confidence, 1),
+                            mark_price=row["close"],
+                            qty_step=mgr.qty_step,
+                            min_qty=mgr.min_qty,
+                            available_balance=avail,
+                        )
+                        if qty > 0:
+                            mgr.open_position(
+                                side=side, margin_usdt=0,
+                                current_price=row["close"],
+                                signals=signals, indicators=indicators,
+                                qty_override=qty,
+                            )
+                        else:
+                            logger.warning(f"SCALP [{symbol}]: 수량 계산 불가 — {detail.get('reason', 'unknown')}")
+                else:
+                    logger.error(f"SCALP [{symbol}]: equity 0, 진입 불가")
+            else:
+                logger.info(f"SCALP [{symbol}]: 매매 차단 - {reason}")
+
+            self.last_processed_candle_ts[symbol] = candle_ts
+
+    def _check_scalp_exit(self, mgr: PositionManager, current_price: float,
+                          combined_signal: int, indicators: dict) -> str | None:
+        """스캘핑 전용 청산 조건 (타이트한 SL/TP + 시간 제한)."""
+        if not mgr.side:
+            return None
+
+        pnl = pct_change(mgr.entry_price, current_price, mgr.side)
+
+        # SL
+        if pnl <= -Config.SCALP_STOP_LOSS_PCT:
+            return "SL_HIT"
+
+        # TP
+        if pnl >= Config.SCALP_TAKE_PROFIT_PCT:
+            return "TP_HIT"
+
+        # Trailing stop
+        if Config.ENABLE_TRAILING_STOP and pnl >= Config.SCALP_TRAILING_ACTIVATE_PCT:
+            if not mgr.trailing_active:
+                mgr.trailing_active = True
+                mgr.trailing_high = current_price
+                logger.info(f"SCALP_TRAILING [{mgr.symbol}]: 활성화 (PnL: +{pnl:.2f}%)")
+
+        if Config.ENABLE_TRAILING_STOP and mgr.trailing_active:
+            if mgr.side == "Buy":
+                if current_price > mgr.trailing_high:
+                    mgr.trailing_high = current_price
+                drawdown = pct_change(mgr.trailing_high, current_price, "Buy")
+            else:
+                if current_price < mgr.trailing_high:
+                    mgr.trailing_high = current_price
+                drawdown = pct_change(mgr.trailing_high, current_price, "Sell")
+
+            if drawdown <= -Config.SCALP_TRAILING_CALLBACK_PCT:
+                return "TRAILING_STOP"
+
+        # Signal reverse
+        if mgr.side == "Buy" and combined_signal == -1:
+            return "SIGNAL_REVERSE"
+        if mgr.side == "Sell" and combined_signal == 1:
+            return "SIGNAL_REVERSE"
+
+        # Time exit (minutes)
+        if mgr.entry_time:
+            minutes_held = (datetime.now(timezone.utc) - mgr.entry_time).total_seconds() / 60
+            if minutes_held >= Config.SCALP_TIME_EXIT_MINUTES and pnl < 0:
+                return "TIME_EXIT"
+
+        return None
+
     def _monitor_position(self, symbol: str, mgr: PositionManager):
         """포지션 실시간 모니터링 (10초 간격)."""
         try:
@@ -925,7 +1204,10 @@ class TradingBot:
             if current_price <= 0:
                 return
 
-            exit_reason = mgr.check_exit(current_price, 0, {})
+            if Config.SCALP_MODE:
+                exit_reason = self._check_scalp_exit(mgr, current_price, 0, {})
+            else:
+                exit_reason = mgr.check_exit(current_price, 0, {})
             if exit_reason:
                 logger.info(f"MONITOR [{symbol}]: 청산 트리거 - {exit_reason}")
                 mgr.close_position(current_price, exit_reason, {})

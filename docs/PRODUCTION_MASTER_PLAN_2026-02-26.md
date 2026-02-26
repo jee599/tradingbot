@@ -18,7 +18,12 @@
 
 ## 0) One-liner
 
-Bybit V5로 XRP/USDT 무기한선물을 1H 기준 전략(MA+RSI+BB+MTF)으로 자동매매한다.
+Bybit V5로 멀티코인(BTC/ETH/XRP/SOL) 무기한선물을 자동매매한다.
+
+전략은 2가지를 지원한다 (feature flag 전환):
+
+- **Plan A (Legacy)**: 1H 기준 MA+RSI+BB+MTF 4지표 과반수 투표
+- **Plan B (Scalp)**: 15m 추세필터 + 5m 풀백/브레이크아웃 스캘핑
 
 -----
 
@@ -53,14 +58,15 @@ Gate는 **리포트 1장으로** 확인 가능해야 한다.
 
 ```text
 /Users/jidong/xrp-trading-bot/
-├─ bot.py                 # 엔트리
+├─ bot.py                 # 엔트리 (전략 라우팅: legacy / scalp)
 ├─ src/
-│  ├─ config.py           # .env 로드
+│  ├─ config.py           # .env 로드 + SCALP_MODE feature flag
 │  ├─ exchange.py         # Bybit 래퍼
-│  ├─ indicators.py       # 지표
-│  ├─ strategy.py         # 시그널/투표
-│  ├─ risk_manager.py     # 하드 리밋
-│  ├─ position.py         # 포지션/청산
+│  ├─ indicators.py       # 지표 (legacy용)
+│  ├─ strategy.py         # Plan A: MA+RSI+BB+MTF 시그널/투표
+│  ├─ strategy_scalp.py   # Plan B: 15m 필터 + 5m 스캘핑 트리거
+│  ├─ risk_manager.py     # 하드 리밋 (공유)
+│  ├─ position.py         # 포지션/청산 (공유)
 │  ├─ logger.py           # 파일 로그
 │  ├─ telegram_bot.py     # 알림
 │  └─ utils.py
@@ -69,15 +75,22 @@ Gate는 **리포트 1장으로** 확인 가능해야 한다.
 │  ├─ restart_bot.sh
 │  └─ update_symbols.py
 ├─ tests/
+│  ├─ test_indicators.py
+│  ├─ test_strategy.py
+│  ├─ test_strategy_scalp.py   # Plan B 시그널 테스트 (25건)
+│  ├─ test_risk_manager.py
+│  └─ test_position_mode.py
 └─ logs/
 ```
 
 ### 지금까지 된 것(요약)
 
-- 전략 뼈대: MA+RSI+BB+MTF 과반수 투표
-- 리스크 하드 리밋(일일 최대 손실/연속 손절/포지션 1개)
+- **Plan A**: MA+RSI+BB+MTF 과반수 투표 전략
+- **Plan B**: 15m EMA 추세필터 + 5m 풀백/BB 브레이크아웃 스캘핑 전략
+- Feature flag `SCALP_MODE` (env)로 전략 전환 (기존 전략 보존)
+- 리스크 하드 리밋(일일 최대 손실/연속 손절/포지션 제한)
 - 로그 체계(매매/시그널/에쿼티/에러)
-- 단위 테스트 존재
+- 단위 테스트: 106건 전체 통과
 
 ### 아직 불안/미완료(런칭 블로커)
 
@@ -266,9 +279,32 @@ bash scripts/restart_bot.sh
 
 -----
 
-## 8) Decisions (선택)
+## 8) 전략 상세
+
+### Plan A (Legacy) — `SCALP_MODE=false`
+
+- 타임프레임: INTERVAL (기본 60분)
+- 지표: MA(EMA20/50 + ADX), RSI(14), BB(20,2σ), MTF(4H EMA 근사)
+- 시그널: 4지표 과반수 투표 (≥2 동의, 반대 0)
+- 청산: SL -2% / TP +4% / 트레일링 +3.5% 활성 -2% 콜백 / 시간 48h
+- 최소 confidence: 3/4
+
+### Plan B (Scalp) — `SCALP_MODE=true`
+
+- 추세 필터: 15m EMA50 vs EMA200 → long-only / short-only / no-trade
+- 진입 트리거 (5m):
+  - **Pullback**: price near EMA20 (0.3%) + 방향 일치 캔들 + RSI 35~65
+  - **Breakout**: close > BB upper (long) / < BB lower (short) + volume ≥ 1.5x
+- 청산: SL -0.8% / TP +1.4% / 트레일링 +0.8% 활성 -0.4% 콜백 / 시간 45분
+- 시그널 주기: 매분
+- 심볼: BTCUSDT, ETHUSDT, XRPUSDT, SOLUSDT
+
+-----
+
+## 9) Decisions (선택)
 
 큰 변경은 `docs/DECISIONS.md`에 남긴다.
 
 - 실전 모드 플래그 정책(기본 off)
 - 손실 제한/레버리지/포지션 비율 기본값
+- 2026-02-26: Plan B 스캘핑 전략 추가 (SCALP_MODE feature flag, 기존 전략 보존)
