@@ -31,8 +31,11 @@ class Config:
     SYMBOL: str = os.getenv("SYMBOL", "XRPUSDT")  # 하위 호환
     SYMBOLS: list = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "XRPUSDT")).split(",") if s.strip()]
     CATEGORY: str = "linear"
-    # 캔들 봉 (Bybit interval). 기본 60=1시간봉, 스캘핑은 10(10분봉) 권장.
-    INTERVAL: str = os.getenv("INTERVAL", "60")
+    # 캔들 봉 (Bybit interval).
+    # Bybit linear kline은 10분봉("10")을 지원하지 않는다(응답 OK지만 list가 비어있음).
+    # 그래서 스캘핑 기본은 15분봉으로 맵핑한다.
+    _INTERVAL_RAW: str = os.getenv("INTERVAL", "60")
+    INTERVAL: str = "15" if _INTERVAL_RAW == "10" else _INTERVAL_RAW
 
     KLINE_LIMIT: int = 300
 
