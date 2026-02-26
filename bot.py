@@ -57,6 +57,9 @@ class TradingBot:
         self.last_signals: dict[str, dict] = {}
         self.last_indicators: dict[str, dict] = {}
 
+        # 캔들 마감 기준 진입용: 심볼별 마지막 처리 캔들 timestamp
+        self.last_processed_candle_ts: dict[str, str] = {}
+
         # 일일 전략 리뷰
         self.last_strategy_review: str = ""
         self.pending_suggestions: list[dict] = []
@@ -682,6 +685,12 @@ class TradingBot:
 
         self.last_signals[symbol] = signals
 
+        # 캔들 마감 기준 진입/신호 판단: 같은 1시간봉을 10분마다 반복 매매하지 않도록 차단
+        candle_ts = str(df.iloc[-1]["timestamp"]) if "timestamp" in df.columns else ""
+        prev_ts = self.last_processed_candle_ts.get(symbol, "")
+        is_new_candle = (candle_ts != "" and candle_ts != prev_ts)
+        allow_entry_this_tick = (not Config.TRADE_ON_CANDLE_CLOSE_ONLY) or is_new_candle
+
         # 4. 현재 지표값 추출
         row = df.iloc[-1]
         indicators = {
@@ -718,12 +727,18 @@ class TradingBot:
         if self.paused:
             action = "PAUSED"
         elif mgr.has_position():
+            # 포지션 청산은 모니터 루프에서도 계속 체크하지만,
+            # 신호 반전/시간 청산 같은 룰은 여기서도 확인한다.
             exit_reason = mgr.check_exit(row["close"], combined, indicators)
             if exit_reason:
                 action = f"CLOSE_{exit_reason}"
         elif combined != 0 and filter_result["passed"]:
             can_trade, reason = self.risk_mgr.can_trade()
-            if can_trade:
+            if not allow_entry_this_tick:
+                action = "WAIT_CANDLE_CLOSE"
+            elif confidence < Config.MIN_ENTRY_CONFIDENCE:
+                action = f"SKIP_LOW_CONF_{confidence}"
+            elif can_trade:
                 action = "OPEN_LONG" if combined == 1 else "OPEN_SHORT"
             else:
                 action = f"BLOCKED_{reason}"
@@ -745,6 +760,8 @@ class TradingBot:
         logger.info(f"SIGNAL [{symbol}]: {signals['signal_detail']} -> {action}")
 
         if self.paused:
+            # 처리한 캔들 ts 기록 (중복 로그 방지)
+            self.last_processed_candle_ts[symbol] = candle_ts
             return
 
         # 6. 포지션 보유 중 → 청산 체크 또는 피라미딩(추가진입)
@@ -752,6 +769,8 @@ class TradingBot:
             exit_reason = mgr.check_exit(row["close"], combined, indicators)
             if exit_reason:
                 mgr.close_position(row["close"], exit_reason, indicators)
+                # 처리한 캔들 ts 기록
+                self.last_processed_candle_ts[symbol] = candle_ts
                 return
 
             # 피라미딩: 같은 방향 시그널 유지 + 현재 수익중일 때만 추가진입
@@ -781,10 +800,25 @@ class TradingBot:
 
         # 7. 포지션 없음 → 시그널에 따라 진입
         elif combined != 0 and filter_result["passed"]:
+            # 캔들 마감 기준 진입 (과매매 방지)
+            if not allow_entry_this_tick:
+                logger.info(f"SIGNAL [{symbol}]: 캔들 마감 대기 → 진입 스킵")
+                self.last_processed_candle_ts[symbol] = candle_ts
+                return
+
+            # 최소 confidence 충족 (2/4 과반 진입 방지)
+            if confidence < Config.MIN_ENTRY_CONFIDENCE:
+                logger.info(
+                    f"SIGNAL [{symbol}]: confidence({confidence}) < MIN_ENTRY_CONFIDENCE({Config.MIN_ENTRY_CONFIDENCE}) → 진입 스킵"
+                )
+                self.last_processed_candle_ts[symbol] = candle_ts
+                return
+
             # 동시 오픈 포지션 제한
             active_positions = sum(1 for m in self.pos_managers.values() if m.has_position())
             if active_positions >= Config.MAX_OPEN_POSITIONS:
                 logger.warning(f"RISK: 동시 포지션 제한({Config.MAX_OPEN_POSITIONS}) 도달 → {symbol} 진입 스킵")
+                self.last_processed_candle_ts[symbol] = candle_ts
                 return
 
             can_trade, reason = self.risk_mgr.can_trade()
@@ -827,6 +861,9 @@ class TradingBot:
                     logger.error(f"SIGNAL [{symbol}]: equity 0, 진입 불가")
             else:
                 logger.info(f"SIGNAL [{symbol}]: 매매 차단 - {reason}")
+
+            # 처리한 캔들 ts 기록
+            self.last_processed_candle_ts[symbol] = candle_ts
 
     def _monitor_position(self, symbol: str, mgr: PositionManager):
         """포지션 실시간 모니터링 (10초 간격)."""

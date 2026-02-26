@@ -38,8 +38,18 @@ class Config:
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "5"))
     STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "2.0"))
     TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "4.0"))
-    TRAILING_STOP_ACTIVATE_PCT: float = float(os.getenv("TRAILING_STOP_ACTIVATE_PCT", "2.0"))
-    TRAILING_STOP_CALLBACK_PCT: float = float(os.getenv("TRAILING_STOP_CALLBACK_PCT", "1.0"))
+
+    # 수익 극대화 모드(B): 트레일링을 너무 일찍 켜면 승자가 잘려서 win small이 되기 쉬움.
+    # 기본값은 "늦게 활성 + 넓은 콜백"으로 설정.
+    ENABLE_TRAILING_STOP: bool = os.getenv("ENABLE_TRAILING_STOP", "true").lower() == "true"
+    TRAILING_STOP_ACTIVATE_PCT: float = float(os.getenv("TRAILING_STOP_ACTIVATE_PCT", "3.5"))
+    TRAILING_STOP_CALLBACK_PCT: float = float(os.getenv("TRAILING_STOP_CALLBACK_PCT", "2.0"))
+
+    # 엔트리 품질
+    MIN_ENTRY_CONFIDENCE: int = int(os.getenv("MIN_ENTRY_CONFIDENCE", "3"))
+
+    # 캔들 마감 기준으로만 신규 진입 판단 (과매매/잡음 감소)
+    TRADE_ON_CANDLE_CLOSE_ONLY: bool = os.getenv("TRADE_ON_CANDLE_CLOSE_ONLY", "true").lower() == "true"
 
     # 포지션 사이징 (잔고 기반)
     BALANCE_UTILIZATION_PCT: float = float(os.getenv("BALANCE_UTILIZATION_PCT", "90"))

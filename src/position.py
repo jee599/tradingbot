@@ -39,6 +39,7 @@ class PositionManager:
         self.entry_price: float = 0.0
         self.side: str = ""
         self.qty: float = 0.0
+        self.add_count: int = 0  # 피라미딩 추가진입 횟수
         self.signals_at_entry: dict = {}
         self.indicators_at_entry: dict = {}
 
@@ -86,6 +87,7 @@ class PositionManager:
         self.indicators_at_entry = indicators
         self.trailing_active = False
         self.trailing_high = current_price
+        self.add_count = 0
 
         direction = "Long" if side == "Buy" else "Short"
         sl_price = self._calc_sl_price()
@@ -107,12 +109,22 @@ class PositionManager:
         # 서버사이드 SL/TP 설정
         self.exchange.set_trading_stop(sl_price, tp_price, symbol=self.symbol, side=side)
 
+        # Human-readable entry reason (Korean)
+        combined = signals.get("combined")
+        if combined == 1:
+            reason = "시그널 종합 결과: 롱(매수) 우세"
+        elif combined == -1:
+            reason = "시그널 종합 결과: 숏(매도) 우세"
+        else:
+            reason = "시그널 조건 충족"
+
         self.notifier.notify_entry(
             side=side, price=current_price, qty=qty, leverage=Config.LEVERAGE,
             sl=sl_price, tp=tp_price,
             sl_pct=Config.STOP_LOSS_PCT, tp_pct=Config.TAKE_PROFIT_PCT,
             signals=signal_values, confidence=confidence,
             symbol_name=name,
+            reason=reason,
         )
 
         return True
@@ -131,13 +143,13 @@ class PositionManager:
         if pnl >= Config.TAKE_PROFIT_PCT:
             return "TP_HIT"
 
-        if pnl >= Config.TRAILING_STOP_ACTIVATE_PCT:
+        if Config.ENABLE_TRAILING_STOP and pnl >= Config.TRAILING_STOP_ACTIVATE_PCT:
             if not self.trailing_active:
                 self.trailing_active = True
                 self.trailing_high = current_price
                 logger.info(f"TRAILING [{self.symbol}]: 활성화 (PnL: +{pnl:.2f}%)")
 
-        if self.trailing_active:
+        if Config.ENABLE_TRAILING_STOP and self.trailing_active:
             updated = False
             if self.side == "Buy":
                 if current_price > self.trailing_high:
@@ -247,10 +259,71 @@ class PositionManager:
             net_pnl=net_pnl_usdt, fee_total=fee_total,
             holding_hours=holding_hours,
             symbol_name=name,
+            detail=f"진입가 {self.entry_price:.4f} → 청산가 {current_price:.4f} | 수량 {self.qty}",
         )
 
         self._reset()
         return trade_data
+
+    def add_position(self, current_price: float, signals: dict, indicators: dict, qty_add: float) -> bool:
+        """피라미딩(추가진입). 이미 보유중인 포지션에 같은 방향으로 수량을 추가한다."""
+        if not self.side:
+            return False
+        if qty_add <= 0:
+            return False
+
+        if qty_add < self.min_qty:
+            logger.warning(f"PYRAMID [{self.symbol}]: 추가 수량 {qty_add} < 최소 {self.min_qty}, 스킵")
+            return False
+
+        side = self.side
+        result = self.exchange.place_order(side, qty_add, symbol=self.symbol)
+        if result is None:
+            return False
+
+        # 평균 단가 갱신
+        prev_value = self.entry_price * self.qty
+        add_value = current_price * qty_add
+        new_qty = self.qty + qty_add
+        if new_qty > 0:
+            self.entry_price = (prev_value + add_value) / new_qty
+        self.qty = new_qty
+        self.add_count += 1
+        self.trailing_high = max(self.trailing_high, current_price)
+
+        sl_price = self._calc_sl_price()
+        tp_price = self._calc_tp_price()
+        name = self._short_name()
+
+        # 서버사이드 SL/TP 재설정(평균단가 기준)
+        self.exchange.set_trading_stop(sl_price, tp_price, symbol=self.symbol, side=side)
+
+        confidence = signals.get("confidence", 0)
+        signal_values = {
+            k: v.get("value", 0) if isinstance(v, dict) else v
+            for k, v in signals.items()
+            if k in ("MA", "RSI", "BB", "MTF")
+        }
+
+        self.notifier.notify_entry(
+            side=side,
+            price=current_price,
+            qty=qty_add,
+            leverage=Config.LEVERAGE,
+            sl=sl_price,
+            tp=tp_price,
+            sl_pct=Config.STOP_LOSS_PCT,
+            tp_pct=Config.TAKE_PROFIT_PCT,
+            signals=signal_values,
+            confidence=confidence,
+            symbol_name=name,
+            reason=f"추가진입 #{self.add_count} (피라미딩) | 평균단가 ${self.entry_price:.4f}",
+        )
+
+        logger.info(
+            f"PYRAMID_ADD [{self.symbol}]: add#{self.add_count} +{qty_add} @ ${current_price:.4f} -> qty={self.qty} avg=${self.entry_price:.4f}"
+        )
+        return True
 
     def sync_with_exchange(self):
         """거래소 포지션과 내부 상태 동기화."""
@@ -330,7 +403,15 @@ class PositionManager:
         self.risk_mgr.record_trade(net_pnl_pct, exit_reason)
 
         logger.info(f"SERVER_CLOSE [{self.symbol}]: {direction} | {exit_reason} | PnL: {pnl_pct:+.2f}%")
-        self.notifier.notify_exit(exit_reason, pnl_pct, net_pnl_usdt, fee_total, holding_hours, symbol_name=name)
+        self.notifier.notify_exit(
+            exit_reason,
+            pnl_pct,
+            net_pnl_usdt,
+            fee_total,
+            holding_hours,
+            symbol_name=name,
+            detail=f"진입가 {self.entry_price:.4f} → 청산가 {current_price:.4f} | 수량 {self.qty}",
+        )
 
     def has_position(self) -> bool:
         return bool(self.side)
@@ -367,6 +448,7 @@ class PositionManager:
         self.entry_price = 0.0
         self.side = ""
         self.qty = 0.0
+        self.add_count = 0
         self.signals_at_entry = {}
         self.indicators_at_entry = {}
         self.trailing_active = False
