@@ -122,6 +122,19 @@ class Config:
     # 5m BB 브레이크아웃 볼륨 배수
     SCALP_BB_VOL_RATIO: float = float(os.getenv("SCALP_BB_VOL_RATIO", "1.5"))
 
+    # 스캘핑 레짐 필터 (횡보장 회피)
+    SCALP_REGIME_FILTER: bool = os.getenv("SCALP_REGIME_FILTER", "true").lower() == "true"
+    SCALP_REGIME_ADX_MIN: float = float(os.getenv("SCALP_REGIME_ADX_MIN", "20"))
+    SCALP_REGIME_BB_WIDTH_MIN: float = float(os.getenv("SCALP_REGIME_BB_WIDTH_MIN", "0.005"))
+
+    # 스캘핑 수수료+슬리피지 버퍼 (SL/TP 보정)
+    # 기본값: 왕복 taker 0.055%×2 = 0.11%, 슬리피지 추가 → 0.15%
+    SCALP_FEE_BUFFER_PCT: float = float(os.getenv("SCALP_FEE_BUFFER_PCT", "0.15"))
+
+    # 스캘핑 브레이크이븐 시간 청산 (분)
+    # 일정 시간 후 수익이 fee buffer 미만이면 조기 청산
+    SCALP_TIME_EXIT_BREAKEVEN_MIN: int = int(os.getenv("SCALP_TIME_EXIT_BREAKEVEN_MIN", "30"))
+
     # 진입 필터
     MIN_VOLUME_RATIO: float = float(os.getenv("MIN_VOLUME_RATIO", "0.3"))  # 20봉 평균 대비
     MAX_SPREAD_MULTIPLIER: float = 3.0  # 평소 대비 3배 이상 스프레드

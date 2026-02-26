@@ -1040,6 +1040,27 @@ class TradingBot:
 
         filter_result = self.risk_mgr.check_entry_filters(df_5m_ind, False)
 
+        # Spread filter for scalp mode
+        spread_ok = True
+        try:
+            orderbook = self.exchange.get_orderbook(symbol=symbol)
+            spread = orderbook.get("spread", 0)
+            if spread > 0:
+                self.spread_samples.append(spread)
+                if len(self.spread_samples) > 100:
+                    self.spread_samples = self.spread_samples[-100:]
+                self.avg_spread = sum(self.spread_samples) / len(self.spread_samples)
+            spread_ok = self.risk_mgr.check_spread_filter(spread, self.avg_spread)
+            if not spread_ok:
+                filter_result["wide_spread"] = True
+                filter_result["passed"] = False
+        except Exception as e:
+            logger.debug(f"SCALP [{symbol}]: Spread check skipped: {e}")
+
+        # Regime filter result
+        regime_ok = signals.get("regime_ok", True)
+        regime_reason = signals.get("regime_reason", "")
+
         action = "HOLD"
         if self.paused:
             action = "PAUSED"
@@ -1070,6 +1091,7 @@ class TradingBot:
             "combined_signal": combined,
             "signal_detail": signals["signal_detail"],
             "filter_check": filter_result,
+            "regime_filter": {"ok": regime_ok, "reason": regime_reason},
             "action": action,
             "current_position": current_position,
         }
@@ -1187,6 +1209,13 @@ class TradingBot:
         # Time exit (minutes)
         if mgr.entry_time:
             minutes_held = (datetime.now(timezone.utc) - mgr.entry_time).total_seconds() / 60
+
+            # Breakeven time exit: if held > N min and PnL below fee buffer → exit early
+            if (minutes_held >= Config.SCALP_TIME_EXIT_BREAKEVEN_MIN
+                    and pnl < Config.SCALP_FEE_BUFFER_PCT):
+                return "TIME_EXIT_BE"
+
+            # Hard time exit: if held > max minutes and PnL negative → exit
             if minutes_held >= Config.SCALP_TIME_EXIT_MINUTES and pnl < 0:
                 return "TIME_EXIT"
 
@@ -1203,6 +1232,9 @@ class TradingBot:
             current_price = ticker.get("last_price", 0)
             if current_price <= 0:
                 return
+
+            # Update MFE/MAE price extremes
+            mgr.update_price_extremes(current_price)
 
             if Config.SCALP_MODE:
                 exit_reason = self._check_scalp_exit(mgr, current_price, 0, {})

@@ -6,7 +6,7 @@ import logging
 import pandas as pd
 
 from src.config import Config
-from src.indicators import ema, calc_rsi, calc_bollinger, sma
+from src.indicators import ema, calc_rsi, calc_bollinger, calc_adx, sma
 
 logger = logging.getLogger("xrp_bot")
 
@@ -46,6 +46,56 @@ def calc_trend_filter(df_15m: pd.DataFrame) -> int:
 
 
 # ──────────────────────────────────────────
+# 레짐 필터 (횡보장 회피)
+# ──────────────────────────────────────────
+
+def check_regime_filter(df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> tuple[bool, str]:
+    """레짐 필터: 횡보장(chop)이면 진입 차단.
+
+    ADX(14)가 낮고 BB 밴드폭이 좁으면 횡보로 판단.
+    둘 다 임계값 미만이어야 차단 (OR → 하나만 충분하면 트레이딩 허용).
+
+    기본값:
+        SCALP_REGIME_ADX_MIN=20: ADX<20이면 추세 없음
+        SCALP_REGIME_BB_WIDTH_MIN=0.005: bb_width<0.5%면 변동성 극히 낮음
+
+    Returns:
+        (passed, reason)
+    """
+    if not Config.SCALP_REGIME_FILTER:
+        return True, "Regime filter disabled"
+
+    adx_min = Config.SCALP_REGIME_ADX_MIN
+    bw_min = Config.SCALP_REGIME_BB_WIDTH_MIN
+
+    # ADX from 15m (higher timeframe = more stable regime read)
+    adx_val = 0.0
+    if not df_15m.empty and len(df_15m) >= 30:
+        adx_df = calc_adx(df_15m, 14)
+        adx_val = adx_df["adx"].iloc[-1]
+
+    # BB width from 5m (entry timeframe volatility)
+    bw_val = 0.0
+    if not df_5m.empty and len(df_5m) >= 20:
+        bb = calc_bollinger(df_5m, 20, 2.0)
+        bw_val = bb["bb_width"].iloc[-1]
+
+    low_adx = adx_val < adx_min
+    low_bw = bw_val < bw_min
+
+    if low_adx and low_bw:
+        reason = (
+            f"Chop regime: ADX={adx_val:.1f}<{adx_min} AND "
+            f"bb_width={bw_val:.4f}<{bw_min} → blocked"
+        )
+        logger.debug(f"REGIME_FILTER: {reason}")
+        return False, reason
+
+    reason = f"Regime OK: ADX={adx_val:.1f}, bb_width={bw_val:.4f}"
+    return True, reason
+
+
+# ──────────────────────────────────────────
 # 5m 지표 계산
 # ──────────────────────────────────────────
 
@@ -67,6 +117,7 @@ def calc_scalp_indicators(df_5m: pd.DataFrame) -> pd.DataFrame:
     df["bb_mid"] = bb["bb_mid"]
     df["bb_lower"] = bb["bb_lower"]
     df["bb_pct"] = bb["bb_pct"]
+    df["bb_width"] = bb["bb_width"]
 
     vol_ma = sma(df["volume"], 20)
     df["volume_ratio"] = df["volume"] / vol_ma.replace(0, float("nan"))
@@ -181,6 +232,8 @@ def generate_scalp_signals(
         "signal_detail": "Insufficient data",
         "confidence": 0,
         "trigger": "none",
+        "regime_ok": True,
+        "regime_reason": "",
     }
 
     if df_5m.empty or len(df_5m) < 50:
@@ -195,15 +248,18 @@ def generate_scalp_signals(
     else:
         trend_reason = "15m no trend or insufficient data"
 
-    # 2. 5m 지표 계산
+    # 2. 레짐 필터 (횡보장 회피)
+    regime_ok, regime_reason = check_regime_filter(df_15m, df_5m)
+
+    # 3. 5m 지표 계산
     df_5m = calc_scalp_indicators(df_5m)
     row = df_5m.iloc[-1]
 
-    # 3. 트리거 체크
+    # 4. 트리거 체크
     pb_val, pb_reason = signal_pullback(row, trend)
     bo_val, bo_reason = signal_breakout(row, trend)
 
-    # 4. 통합: 어느 하나라도 발동하면 진입
+    # 5. 통합: 어느 하나라도 발동하면 진입
     combined = 0
     trigger = "none"
     triggers_fired = 0
@@ -216,6 +272,13 @@ def generate_scalp_signals(
         combined = bo_val
         trigger = "breakout" if triggers_fired == 0 else "both"
         triggers_fired += 1
+
+    # 레짐 필터가 차단하면 시그널을 0으로 리셋
+    if not regime_ok and combined != 0:
+        logger.info(f"SCALP_SIGNAL: {regime_reason} → signal suppressed")
+        combined = 0
+        trigger = "none"
+        triggers_fired = 0
 
     confidence = triggers_fired  # 0, 1, or 2
 
@@ -235,6 +298,8 @@ def generate_scalp_signals(
         "signal_detail": detail,
         "confidence": confidence,
         "trigger": trigger,
+        "regime_ok": regime_ok,
+        "regime_reason": regime_reason,
     }
 
     logger.debug(f"SCALP_SIGNAL: {detail}")

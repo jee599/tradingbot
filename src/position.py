@@ -47,6 +47,10 @@ class PositionManager:
         self.trailing_active: bool = False
         self.trailing_high: float = 0.0
 
+        # MFE/MAE tracking (backtest diagnostics)
+        self.running_high_price: float = 0.0  # best price during trade
+        self.running_low_price: float = float("inf")  # worst price during trade
+
         # 수수료 추적
         self.fee_rate: float = 0.00055  # Bybit taker fee 0.055%
 
@@ -87,6 +91,8 @@ class PositionManager:
         self.indicators_at_entry = indicators
         self.trailing_active = False
         self.trailing_high = current_price
+        self.running_high_price = current_price
+        self.running_low_price = current_price
         self.add_count = 0
 
         direction = "Long" if side == "Buy" else "Short"
@@ -195,6 +201,10 @@ class PositionManager:
             logger.error(f"POSITION [{self.symbol}]: 청산 주문 실패")
             return None
 
+        # Final price extreme update
+        self.update_price_extremes(current_price)
+        mfe_mae = self.calc_mfe_mae(current_price)
+
         pnl_pct = pct_change(self.entry_price, current_price, self.side)
         position_value = self.entry_price * self.qty
         pnl_usdt = position_value * (pnl_pct / 100)
@@ -243,6 +253,9 @@ class PositionManager:
                 "max_profit_during_trade_pct": round(max(0, pnl_pct), 2),
                 "trailing_stop_activated": self.trailing_active,
                 "trailing_stop_high": round(self.trailing_high, 6),
+                "mfe_pct": mfe_mae["mfe_pct"],
+                "mae_pct": mfe_mae["mae_pct"],
+                "r_multiple": mfe_mae["r_multiple"],
             },
         }
 
@@ -413,6 +426,43 @@ class PositionManager:
             detail=f"진입가 {self.entry_price:.4f} → 청산가 {current_price:.4f} | 수량 {self.qty}",
         )
 
+    def update_price_extremes(self, current_price: float):
+        """Update running high/low for MFE/MAE tracking."""
+        if not self.side or current_price <= 0:
+            return
+        if current_price > self.running_high_price:
+            self.running_high_price = current_price
+        if current_price < self.running_low_price:
+            self.running_low_price = current_price
+
+    def calc_mfe_mae(self, exit_price: float) -> dict:
+        """Calculate MFE, MAE, and R-multiple for the trade.
+
+        MFE = max favorable excursion (best unrealized PnL during trade)
+        MAE = max adverse excursion (worst unrealized PnL during trade)
+        R-multiple = net PnL / initial risk (SL distance)
+        """
+        if not self.side or self.entry_price <= 0:
+            return {"mfe_pct": 0, "mae_pct": 0, "r_multiple": 0}
+
+        if self.side == "Buy":
+            mfe_pct = (self.running_high_price - self.entry_price) / self.entry_price * 100
+            mae_pct = (self.running_low_price - self.entry_price) / self.entry_price * 100
+        else:
+            mfe_pct = (self.entry_price - self.running_low_price) / self.entry_price * 100
+            mae_pct = (self.entry_price - self.running_high_price) / self.entry_price * 100
+
+        # R-multiple: actual PnL / initial risk (SL%)
+        sl_pct = Config.SCALP_STOP_LOSS_PCT if Config.SCALP_MODE else Config.STOP_LOSS_PCT
+        actual_pnl = pct_change(self.entry_price, exit_price, self.side)
+        r_multiple = actual_pnl / sl_pct if sl_pct > 0 else 0
+
+        return {
+            "mfe_pct": round(mfe_pct, 4),
+            "mae_pct": round(mae_pct, 4),
+            "r_multiple": round(r_multiple, 4),
+        }
+
     def has_position(self) -> bool:
         return bool(self.side)
 
@@ -431,16 +481,24 @@ class PositionManager:
         }
 
     def _calc_sl_price(self) -> float:
+        sl_pct = Config.SCALP_STOP_LOSS_PCT if Config.SCALP_MODE else Config.STOP_LOSS_PCT
+        # In scalp mode, widen SL by fee+slippage buffer so net loss stays bounded
+        if Config.SCALP_MODE:
+            sl_pct += Config.SCALP_FEE_BUFFER_PCT
         if self.side == "Buy":
-            return self.entry_price * (1 - Config.STOP_LOSS_PCT / 100)
+            return self.entry_price * (1 - sl_pct / 100)
         else:
-            return self.entry_price * (1 + Config.STOP_LOSS_PCT / 100)
+            return self.entry_price * (1 + sl_pct / 100)
 
     def _calc_tp_price(self) -> float:
+        tp_pct = Config.SCALP_TAKE_PROFIT_PCT if Config.SCALP_MODE else Config.TAKE_PROFIT_PCT
+        # In scalp mode, narrow TP by fee+slippage buffer so net profit target is realistic
+        if Config.SCALP_MODE:
+            tp_pct = max(tp_pct - Config.SCALP_FEE_BUFFER_PCT, 0.1)
         if self.side == "Buy":
-            return self.entry_price * (1 + Config.TAKE_PROFIT_PCT / 100)
+            return self.entry_price * (1 + tp_pct / 100)
         else:
-            return self.entry_price * (1 - Config.TAKE_PROFIT_PCT / 100)
+            return self.entry_price * (1 - tp_pct / 100)
 
     def _reset(self):
         self.trade_id = None
@@ -453,3 +511,5 @@ class PositionManager:
         self.indicators_at_entry = {}
         self.trailing_active = False
         self.trailing_high = 0.0
+        self.running_high_price = 0.0
+        self.running_low_price = float("inf")

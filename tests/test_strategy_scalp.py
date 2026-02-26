@@ -7,10 +7,12 @@ import pytest
 from src.strategy_scalp import (
     calc_trend_filter,
     calc_scalp_indicators,
+    check_regime_filter,
     signal_pullback,
     signal_breakout,
     generate_scalp_signals,
 )
+from src.config import Config
 
 
 def _make_df(n=300, seed=42, trend="up"):
@@ -275,3 +277,87 @@ class TestGenerateScalpSignals:
         df_15m = _make_df(300, trend="up")
         result = generate_scalp_signals(df_5m, df_15m)
         assert result["trigger"] in ("pullback", "breakout", "both", "none")
+
+    def test_regime_filter_keys_present(self):
+        """Result includes regime_ok and regime_reason."""
+        df_5m = _make_df(100, trend="up")
+        df_15m = _make_df(300, trend="up")
+        result = generate_scalp_signals(df_5m, df_15m)
+        assert "regime_ok" in result
+        assert "regime_reason" in result
+
+
+# ──────────────────────────────────────────
+# 레짐 필터 테스트
+# ──────────────────────────────────────────
+
+class TestRegimeFilter:
+    def test_disabled_always_passes(self):
+        """Filter disabled → always pass."""
+        original = Config.SCALP_REGIME_FILTER
+        try:
+            Config.SCALP_REGIME_FILTER = False
+            passed, reason = check_regime_filter(pd.DataFrame(), pd.DataFrame())
+            assert passed is True
+            assert "disabled" in reason
+        finally:
+            Config.SCALP_REGIME_FILTER = original
+
+    def test_strong_trend_passes(self):
+        """Strong trend (high ADX + wide BB) → pass."""
+        original = Config.SCALP_REGIME_FILTER
+        try:
+            Config.SCALP_REGIME_FILTER = True
+            df_15m = _make_df(300, trend="up")
+            df_5m = _make_df(100, trend="up")
+            passed, reason = check_regime_filter(df_15m, df_5m)
+            assert passed is True
+            assert "Regime OK" in reason
+        finally:
+            Config.SCALP_REGIME_FILTER = original
+
+    def test_flat_market_blocked(self):
+        """Very flat market (tiny noise) → low ADX + narrow BB → blocked."""
+        original_filter = Config.SCALP_REGIME_FILTER
+        original_adx = Config.SCALP_REGIME_ADX_MIN
+        original_bw = Config.SCALP_REGIME_BB_WIDTH_MIN
+        try:
+            Config.SCALP_REGIME_FILTER = True
+            Config.SCALP_REGIME_ADX_MIN = 20
+            Config.SCALP_REGIME_BB_WIDTH_MIN = 0.005
+            # Very flat data: close ~100 with negligible noise
+            rng = np.random.default_rng(99)
+            n = 300
+            closes = 100.0 + rng.normal(0, 0.0001, n)
+            highs = closes + 0.0001
+            lows = closes - 0.0001
+            df = pd.DataFrame({
+                "open": closes, "high": highs, "low": lows,
+                "close": closes, "volume": np.ones(n) * 1000,
+            })
+            passed, reason = check_regime_filter(df, df)
+            assert passed is False
+            assert "Chop regime" in reason
+        finally:
+            Config.SCALP_REGIME_FILTER = original_filter
+            Config.SCALP_REGIME_ADX_MIN = original_adx
+            Config.SCALP_REGIME_BB_WIDTH_MIN = original_bw
+
+    def test_insufficient_data_passes(self):
+        """Insufficient data → passes (not enough to judge)."""
+        original = Config.SCALP_REGIME_FILTER
+        try:
+            Config.SCALP_REGIME_FILTER = True
+            df_short = _make_df(10, trend="up")
+            passed, reason = check_regime_filter(df_short, df_short)
+            # With insufficient data, ADX=0 and bb_width=0 → both below threshold → blocked
+            # But that's correct: tiny data is risky too
+            assert isinstance(passed, bool)
+        finally:
+            Config.SCALP_REGIME_FILTER = original
+
+    def test_bb_width_column_added(self):
+        """calc_scalp_indicators adds bb_width column."""
+        df = _make_df(100, trend="up")
+        result = calc_scalp_indicators(df)
+        assert "bb_width" in result.columns

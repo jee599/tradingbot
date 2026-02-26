@@ -299,6 +299,49 @@ bash scripts/restart_bot.sh
 - 시그널 주기: 매분
 - 심볼: BTCUSDT, ETHUSDT, XRPUSDT, SOLUSDT
 
+#### Plan B 개선 (v2)
+
+**레짐 필터** (`SCALP_REGIME_FILTER=true`):
+- 횡보장(chop) 회피: ADX(14) < 20 **AND** BB width < 0.5% → 진입 차단
+- ADX는 15m에서 계산 (안정적 추세 판독), BB width는 5m (변동성)
+- 둘 다 낮아야 차단 (하나만 높으면 트레이딩 허용)
+- 파라미터: `SCALP_REGIME_ADX_MIN=20`, `SCALP_REGIME_BB_WIDTH_MIN=0.005`
+
+**스프레드 필터**:
+- 진입 직전 orderbook 스프레드 조회
+- 스프레드 > 평균 × 3.0배 → 진입 차단 (슬리피지 방지)
+- 기존 `check_spread_filter()` 활용, 스캘핑 경로에 연결
+
+**수수료+슬리피지 버퍼** (`SCALP_FEE_BUFFER_PCT=0.15`):
+- SL을 버퍼만큼 확장 (0.8% → 0.95%): 수수료 감안한 실질 손절
+- TP를 버퍼만큼 축소 (1.4% → 1.25%): 수수료 감안한 실질 익절
+- 서버사이드 SL/TP에 반영되어 net PnL이 더 예측 가능
+
+**시간 청산 (2단계)**:
+1. **브레이크이븐 청산** (`SCALP_TIME_EXIT_BREAKEVEN_MIN=30`):
+   30분 후 PnL < 수수료 버퍼(0.15%) → 조기 청산 (TIME_EXIT_BE)
+2. **하드 시간 청산** (`SCALP_TIME_EXIT_MINUTES=45`):
+   45분 후 PnL < 0 → 청산 (TIME_EXIT)
+
+**MFE/MAE/R-multiple 진단**:
+- 매 거래에 MFE(최대순간이익), MAE(최대순간손실), R-multiple 기록
+- 10초 모니터링 루프에서 running high/low 갱신
+- trade_data.risk_metrics에 포함 → 백테스트 진단 가능
+
+#### Plan B 파라미터 가이드
+
+| 파라미터 | 기본값 | 설명 | 조정 가이드 |
+|---------|--------|------|------------|
+| SCALP_STOP_LOSS_PCT | 0.8% | 손절 | 0.5~1.2% (변동성에 따라) |
+| SCALP_TAKE_PROFIT_PCT | 1.4% | 익절 | 1.0~2.0% (SL의 1.5~2x 권장) |
+| SCALP_FEE_BUFFER_PCT | 0.15% | 수수료+슬리피지 버퍼 | 왕복 taker fee + 슬리피지 추정 |
+| SCALP_TIME_EXIT_MINUTES | 45 | 하드 시간 청산 (분) | 30~60분 |
+| SCALP_TIME_EXIT_BREAKEVEN_MIN | 30 | 브레이크이븐 청산 (분) | 20~40분 |
+| SCALP_REGIME_ADX_MIN | 20 | 레짐 ADX 임계값 | 15~25 (낮을수록 더 많은 거래 허용) |
+| SCALP_REGIME_BB_WIDTH_MIN | 0.005 | 레짐 BB폭 임계값 | 0.003~0.008 |
+| SCALP_TRAILING_ACTIVATE_PCT | 0.8% | 트레일링 활성화 | TP의 50~70% |
+| SCALP_TRAILING_CALLBACK_PCT | 0.4% | 트레일링 콜백 | 0.3~0.6% |
+
 -----
 
 ## 9) Decisions (선택)
@@ -308,3 +351,4 @@ bash scripts/restart_bot.sh
 - 실전 모드 플래그 정책(기본 off)
 - 손실 제한/레버리지/포지션 비율 기본값
 - 2026-02-26: Plan B 스캘핑 전략 추가 (SCALP_MODE feature flag, 기존 전략 보존)
+- 2026-02-26: Plan B v2 개선 — 레짐 필터, 스프레드 필터, 수수료 버퍼, 시간 청산 2단계, MFE/MAE 진단
