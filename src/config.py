@@ -31,7 +31,9 @@ class Config:
     SYMBOL: str = os.getenv("SYMBOL", "XRPUSDT")  # 하위 호환
     SYMBOLS: list = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "XRPUSDT")).split(",") if s.strip()]
     CATEGORY: str = "linear"
-    INTERVAL: str = "60"  # 1시간봉
+    # 캔들 봉 (Bybit interval). 기본 60=1시간봉, 스캘핑은 10(10분봉) 권장.
+    INTERVAL: str = os.getenv("INTERVAL", "60")
+
     KLINE_LIMIT: int = 300
 
     LEVERAGE: int = int(os.getenv("LEVERAGE", "1"))
