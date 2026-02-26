@@ -117,7 +117,9 @@ class BotLogger:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            writer.writerow(equity_data)
+            # Avoid CSV schema mismatch when equity_data contains extra keys.
+            row = {k: equity_data.get(k, "") for k in fieldnames}
+            writer.writerow(row)
 
     def get_recent_trades(self, limit: int = 50) -> list[dict]:
         """최근 매매 기록 로드."""
