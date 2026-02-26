@@ -23,7 +23,7 @@ class BotLogger:
 
     def _ensure_dirs(self):
         """로그 디렉토리 생성."""
-        for sub in ["", "trades", "signals", "equity", "errors"]:
+        for sub in ["", "trades", "signals", "equity", "errors", "config"]:
             (self.log_dir / sub).mkdir(parents=True, exist_ok=True)
 
     def _setup_logging(self):
@@ -103,6 +103,13 @@ class BotLogger:
                 signals = []
         signals.append(signal_data)
         filename.write_text(json.dumps(signals, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def log_config_change(self, change: dict):
+        """설정 변경(운영 커맨드 등)을 JSONL로 기록."""
+        filename = self.log_dir / "config" / f"config_changes_{month_str()}.jsonl"
+        line = json.dumps(change, ensure_ascii=False)
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
     def log_equity(self, equity_data: dict):
         """잔고 데이터를 일별 CSV에 추가."""

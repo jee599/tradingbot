@@ -618,30 +618,78 @@ class TradingBot:
             val = int(val)
             if val < 1 or val > Config.MAX_LEVERAGE:
                 return f"\u274c 레버리지 범위: 1~{Config.MAX_LEVERAGE}"
+            old = Config.LEVERAGE
             Config.LEVERAGE = val
             for sym in self.symbols:
                 self.exchange.setup_leverage(sym, val)
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "LEVERAGE",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 레버리지 변경: {val}x (전체 코인)"
         elif key == "sl":
             if val <= 0 or val > 20:
                 return "\u274c SL 범위: 0.1~20%"
+            old = Config.STOP_LOSS_PCT
             Config.STOP_LOSS_PCT = val
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "STOP_LOSS_PCT",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 SL 변경: -{val}%"
         elif key == "tp":
             if val <= 0 or val > 50:
                 return "\u274c TP 범위: 0.1~50%"
+            old = Config.TAKE_PROFIT_PCT
             Config.TAKE_PROFIT_PCT = val
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "TAKE_PROFIT_PCT",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 TP 변경: +{val}%"
         elif key == "size":
             if val <= 0 or val > Config.MAX_POSITION_SIZE_PCT:
                 return f"\u274c 사이즈 범위: 0.1~{Config.MAX_POSITION_SIZE_PCT}%"
+            old = Config.POSITION_SIZE_PCT
             Config.POSITION_SIZE_PCT = val
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "POSITION_SIZE_PCT",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 포지션 사이즈 변경: {val}%"
         elif key == "trailing":
+            old = Config.TRAILING_STOP_ACTIVATE_PCT
             Config.TRAILING_STOP_ACTIVATE_PCT = val
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "TRAILING_STOP_ACTIVATE_PCT",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 트레일링 활성 변경: +{val}%"
         elif key == "callback":
+            old = Config.TRAILING_STOP_CALLBACK_PCT
             Config.TRAILING_STOP_CALLBACK_PCT = val
+            self.bot_logger.log_config_change({
+                "timestamp": timestamp_now(),
+                "source": "telegram",
+                "key": "TRAILING_STOP_CALLBACK_PCT",
+                "old": old,
+                "new": val,
+            })
             return f"\u2705 트레일링 콜백 변경: -{val}%"
         else:
             return f"\u274c 알 수 없는 설정: {key}"
