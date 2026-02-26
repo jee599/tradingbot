@@ -9,3 +9,11 @@ dist/
 build/
 .venv/
 venv/
+
+# Local env backups
+.env.bak.*
+.env.bak
+
+# Local runtime/log files
+*.log
+*.pid
